@@ -4,7 +4,7 @@ import { useEffect, useState } from "react"
 import { FileText, RefreshCw, Download } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
 
 type AuditLog = {
   id: string
@@ -23,7 +23,7 @@ export function AuditLogs() {
   const fetchLogs = async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${ASTERISK_API}/audit`)
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.audit))
       const data = await res.json()
       if (Array.isArray(data)) setLogs(data)
     } catch {
@@ -34,9 +34,7 @@ export function AuditLogs() {
   }
 
   useEffect(() => {
-    fetchLogs()
-    const interval = setInterval(fetchLogs, 10000)
-    return () => clearInterval(interval)
+    void fetchLogs()
   }, [])
 
   // ─── Export CSV ───────────────────────────────────────────────────────────

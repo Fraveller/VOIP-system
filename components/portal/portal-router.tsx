@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { TopNavbar } from "./top-navbar"
 import { AdminDashboard } from "./admin-dashboard"
 import { UserDashboard } from "./user-dashboard"
@@ -14,32 +14,56 @@ import { SecurityPage } from "./security-page"
 import { AuditLogs } from "./audit-logs"
 import { SettingsPage } from "./settings-page"
 import { VoicemailPage } from "./voicemail-page"
+import { NotificationsPage } from "./notifications-page"
+import { toast } from "sonner"
 import { useAuth } from "@/lib/auth-context"
+import { useSessionTimeout } from "@/hooks/use-session-timeout"
+import {
+  normalizeSecuritySettings,
+  saveSecuritySettingsLocal,
+  SECURITY_SETTINGS_CHANGED,
+  sessionIdleMs,
+} from "@/lib/security-settings"
 import { MyCallsPage } from "./my-calls-page"
 import { ChangePasswordPage } from "./change-password-page"
 
 // Simple client-side routing since all pages are in one SPA
-import { createContext, useContext } from "react"
+import { RouterContext, useRouter } from "./portal-router-context"
 
-interface RouterContextType {
-  currentPage: string
-  navigate: (page: string) => void
-}
-
-const RouterContext = createContext<RouterContextType>({
-  currentPage: "/dashboard",
-  navigate: () => {},
-})
-
-export function useRouter() {
-  return useContext(RouterContext)
-}
+export { useRouter } from "./portal-router-context"
 
 export function PortalRouter() {
   const [currentPage, setCurrentPage] = useState("/dashboard")
-  const { user } = useAuth()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
+  const { user, logout, isAuthenticated } = useAuth()
+  const [idleMs, setIdleMs] = useState(() => sessionIdleMs())
+
+  useEffect(() => {
+    void fetch("/api/portal/security-settings", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) {
+          saveSecuritySettingsLocal(normalizeSecuritySettings(data))
+          setIdleMs(sessionIdleMs())
+        }
+      })
+      .catch(() => {})
+
+    const onChange = () => setIdleMs(sessionIdleMs())
+    window.addEventListener(SECURITY_SETTINGS_CHANGED, onChange)
+    return () => window.removeEventListener(SECURITY_SETTINGS_CHANGED, onChange)
+  }, [])
+
+  useSessionTimeout(() => {
+    logout()
+    const mins = Math.round(idleMs / 60000)
+    toast.info("Session ended", {
+      description: `You were signed out after ${mins} minutes of inactivity.`,
+    })
+  }, isAuthenticated, idleMs)
 
   const navigate = (page: string) => setCurrentPage(page)
+  const toggleSidebar = () => setSidebarCollapsed((c) => !c)
 
   const renderPage = () => {
     // Force password change if required
@@ -58,6 +82,7 @@ export function PortalRouter() {
         case "/dashboard/reports": return <ReportsPage />
         case "/dashboard/security": return <SecurityPage />
         case "/dashboard/audit-logs": return <AuditLogs />
+        case "/dashboard/notifications": return <NotificationsPage />
         case "/dashboard/settings": return <SettingsPage />
         default: return <AdminDashboard />
       }
@@ -74,12 +99,14 @@ export function PortalRouter() {
   }
 
   return (
-    <RouterContext.Provider value={{ currentPage, navigate }}>
+    <RouterContext.Provider
+      value={{ currentPage, navigate, sidebarCollapsed, toggleSidebar, setSidebarCollapsed }}
+    >
       <div className="flex min-h-screen flex-col">
-        <TopNavbar />
+        <TopNavbar onNavigate={navigate} />
         <div className="flex flex-1">
-          <SidebarNavWrapped currentPage={currentPage} navigate={navigate} />
-          <main className="flex-1 overflow-auto p-6">
+          <SidebarNavWrapped />
+          <main className="flex-1 overflow-auto p-4 md:p-6">
             {renderPage()}
           </main>
         </div>
@@ -88,8 +115,8 @@ export function PortalRouter() {
   )
 }
 
-function SidebarNavWrapped({ currentPage, navigate }: { currentPage: string; navigate: (page: string) => void }) {
-  return <SidebarNavClient currentPage={currentPage} navigate={navigate} />
+function SidebarNavWrapped() {
+  return <SidebarNavClient />
 }
 
 import {
@@ -101,15 +128,13 @@ import {
   Activity,
   BarChart3,
   ShieldAlert,
+  Bell,
   FileText,
   Settings,
   Voicemail,
-  ChevronLeft,
-  ChevronRight,
-  MonitorSmartphone,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
+import { useSidebarGestures } from "@/hooks/use-sidebar-gestures"
 
 const adminLinks = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -121,6 +146,7 @@ const adminLinks = [
   { href: "/dashboard/reports", label: "Reports", icon: BarChart3 },
   { href: "/dashboard/security", label: "Security", icon: ShieldAlert },
   { href: "/dashboard/audit-logs", label: "Audit Logs", icon: FileText },
+  { href: "/dashboard/notifications", label: "Notifications", icon: Bell },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ]
 
@@ -132,19 +158,28 @@ const userLinks = [
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ]
 
-function SidebarNavClient({ currentPage, navigate }: { currentPage: string; navigate: (page: string) => void }) {
+function SidebarNavClient() {
   const { user } = useAuth()
-  const [collapsed, setCollapsed] = useState(false)
+  const { currentPage, navigate, sidebarCollapsed, toggleSidebar, setSidebarCollapsed } =
+    useRouter()
   const links = user?.role === "admin" ? adminLinks : userLinks
+
+  const { asideProps, guardNavClick } = useSidebarGestures({
+    collapsed: sidebarCollapsed,
+    onToggle: toggleSidebar,
+    onExpand: () => setSidebarCollapsed(false),
+    onCollapse: () => setSidebarCollapsed(true),
+  })
 
   return (
     <aside
+      {...asideProps}
       className={cn(
-        "sticky top-16 flex h-[calc(100vh-4rem)] flex-col border-r border-sidebar-border bg-sidebar transition-all duration-300",
-        collapsed ? "w-16" : "w-60"
+        "relative sticky top-16 flex h-[calc(100vh-4rem)] shrink-0 touch-pan-y flex-col border-r border-sidebar-border bg-sidebar transition-all duration-300 select-none",
+        sidebarCollapsed ? "w-14 sm:w-16" : "w-60"
       )}
     >
-      <nav className="flex-1 overflow-y-auto px-2 py-4">
+      <nav className="flex-1 overflow-y-auto px-2 py-3">
         <ul className="flex flex-col gap-1">
           {links.map((link) => {
             const isActive = currentPage === link.href
@@ -152,45 +187,25 @@ function SidebarNavClient({ currentPage, navigate }: { currentPage: string; navi
             return (
               <li key={link.href}>
                 <button
-                  onClick={() => navigate(link.href)}
+                  type="button"
+                  onClick={() => guardNavClick(() => navigate(link.href))}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors text-left",
+                    sidebarCollapsed && "justify-center px-2",
                     isActive
                       ? "bg-sidebar-accent text-sidebar-primary"
                       : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
                   )}
-                  title={collapsed ? link.label : undefined}
+                  title={sidebarCollapsed ? `${link.label} · hold sidebar to expand` : link.label}
                 >
                   <Icon className="h-5 w-5 shrink-0" />
-                  {!collapsed && <span>{link.label}</span>}
+                  {!sidebarCollapsed && <span>{link.label}</span>}
                 </button>
               </li>
             )
           })}
         </ul>
       </nav>
-
-      <div className="border-t border-sidebar-border p-2">
-        {!collapsed && (
-          <div className="mb-2 flex items-center gap-2 px-3 py-2">
-            <MonitorSmartphone className="h-4 w-4 text-sidebar-foreground/50" />
-            <div className="text-xs text-sidebar-foreground/50">
-              <p>Asterisk PBX</p>
-              <p className="flex items-center gap-1">
-                Status: <span className="inline-block h-2 w-2 rounded-full bg-success" /> Online
-              </p>
-            </div>
-          </div>
-        )}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setCollapsed(!collapsed)}
-          className="w-full justify-center text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
-        >
-          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-        </Button>
-      </div>
     </aside>
   )
 }

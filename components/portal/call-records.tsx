@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { KpiCard } from "./kpi-card"
 import { StatusBadge } from "./status-badge"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
 
 type CallRecord = {
   id: string
@@ -34,7 +34,7 @@ export function CallRecords() {
     setLoading(true)
     try {
       // Fetch live active calls
-      const liveRes = await fetch(`${ASTERISK_API}/cdr`)
+      const liveRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.cdr))
       const liveData = await liveRes.json()
       if (Array.isArray(liveData)) setActiveCalls(liveData)
     } catch {
@@ -43,7 +43,7 @@ export function CallRecords() {
 
     try {
       // Fetch real historical CDR from Asterisk CSV
-      const cdrRes = await fetch(`${ASTERISK_API}/realcdr`)
+      const cdrRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.realcdr))
       const cdrData = await cdrRes.json()
       if (Array.isArray(cdrData)) setRecords(cdrData)
     } catch {
@@ -55,9 +55,7 @@ export function CallRecords() {
   }
 
   useEffect(() => {
-    fetchAll()
-    const interval = setInterval(fetchAll, 5000)
-    return () => clearInterval(interval)
+    void fetchAll()
   }, [])
 
   // Combine live + historical

@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { Play, Pause, Download, Trash2, Voicemail, RefreshCw } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
 import { useAuth } from "@/lib/auth-context"
 import { cn } from "@/lib/utils"
 
@@ -28,7 +28,13 @@ export function VoicemailPage() {
   const fetchVoicemails = async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${ASTERISK_API}/voicemail/${user?.extension}`)
+      const res = await fetch(
+        apiUrl(
+          ASTERISK_API,
+          BridgePaths.voicemail,
+          String(user?.extension ?? "")
+        )
+      )
       const data = await res.json()
       if (Array.isArray(data)) setVoicemails(data)
     } catch {
@@ -40,9 +46,7 @@ export function VoicemailPage() {
   }
 
   useEffect(() => {
-    fetchVoicemails()
-    const interval = setInterval(fetchVoicemails, 15000)
-    return () => clearInterval(interval)
+    void fetchVoicemails()
   }, [])
 
   const markAsRead = (id: string) => {

@@ -8,3 +8,6 @@ node_modules/
 .next/
 .env*.local
 .DS_Store
+
+# Portal server-side user store (shared across browsers)
+/data/

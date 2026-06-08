@@ -1,8 +1,8 @@
 "use client"
 
 import Image from "next/image"
-import { useEffect, useState } from "react"
-import { Bell, Search, LogOut, ChevronDown, Shield, X } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Bell, Search, LogOut, ChevronDown, CheckCheck, User, Phone } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -14,127 +14,151 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Badge } from "@/components/ui/badge"
 import { useAuth } from "@/lib/auth-context"
-import { ASTERISK_API, fetchLiveEndpoints } from "@/lib/mock-data"
+import { AsteriskConnectionIndicator } from "./asterisk-connection-indicator"
+import {
+  fetchPortalNotifications,
+  markAllNotificationsAsRead,
+  unreadCount,
+  type PortalNotification,
+} from "@/lib/portal-notifications"
+import {
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+  normalizeUsersList,
+} from "@/lib/mock-data"
+import {
+  filterSearchHits,
+  setPortalPageSearch,
+  type PortalSearchHit,
+} from "@/lib/portal-search"
+import { cn } from "@/lib/utils"
 
-type Notification = {
-  id: string
-  title: string
-  message: string
-  type: "warning" | "info" | "danger"
-  time: string
+type Props = {
+  onNavigate?: (page: string) => void
 }
 
-export function TopNavbar() {
+export function TopNavbar({ onNavigate }: Props) {
   const { user, logout } = useAuth()
   const isAdmin = user?.role === "admin"
-  const [notifications, setNotifications] = useState<Notification[]>([])
-  const [showNotifications, setShowNotifications] = useState(false)
+  const [notifications, setNotifications] = useState<PortalNotification[]>([])
+  const [unread, setUnread] = useState(0)
 
-  // ─── Build real notifications from Asterisk (admin only) ─────────────────
+  const [searchQuery, setSearchQuery] = useState("")
+  const [searchHits, setSearchHits] = useState<PortalSearchHit[]>([])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [allUsers, setAllUsers] = useState<
+    Array<{
+      id?: string
+      name?: string
+      email?: string
+      extension?: string
+      department?: string
+    }>
+  >([])
+  const searchRef = useRef<HTMLDivElement>(null)
+
   const fetchNotifications = async () => {
-    if (!isAdmin) return
-    const notifs: Notification[] = []
-
-    try {
-      // Check unregistered extensions
-      const endpoints = await fetchLiveEndpoints()
-      if (endpoints) {
-        const unregistered = endpoints.filter((e: any) => e.state !== "online").length
-        if (unregistered > 0) {
-          notifs.push({
-            id: "unreg",
-            title: "Unregistered Extensions",
-            message: `${unregistered} extension(s) are not registered`,
-            type: "warning",
-            time: new Date().toLocaleTimeString(),
-          })
-        }
-      }
-
-      // Check active calls
-      const chRes = await fetch(`${ASTERISK_API}/channels`)
-      const channels = await chRes.json()
-      if (Array.isArray(channels) && channels.length > 0) {
-        notifs.push({
-          id: "calls",
-          title: "Active Calls",
-          message: `${channels.length} call(s) in progress right now`,
-          type: "info",
-          time: new Date().toLocaleTimeString(),
-        })
-      }
-
-      // Check system stats
-      const sysRes = await fetch(`${ASTERISK_API}/system`)
-      const sysData = await sysRes.json()
-      if (sysData?.cpu > 80) {
-        notifs.push({
-          id: "cpu",
-          title: "High CPU Usage",
-          message: `Server CPU at ${sysData.cpu}%`,
-          type: "danger",
-          time: new Date().toLocaleTimeString(),
-        })
-      }
-      if (sysData?.memory > 85) {
-        notifs.push({
-          id: "mem",
-          title: "High Memory Usage",
-          message: `Server memory at ${sysData.memory}%`,
-          type: "danger",
-          time: new Date().toLocaleTimeString(),
-        })
-      }
-
-      // Check audit logs for recent actions
-      const auditRes = await fetch(`${ASTERISK_API}/audit`)
-      const auditData = await auditRes.json()
-      if (Array.isArray(auditData) && auditData.length > 0) {
-        const latest = auditData[0]
-        notifs.push({
-          id: "audit",
-          title: "Recent Admin Action",
-          message: `${latest.action}: ${latest.target}`,
-          type: "info",
-          time: latest.timestamp,
-        })
-      }
-
-    } catch { }
-
+    const notifs = await fetchPortalNotifications(isAdmin)
     setNotifications(notifs)
+    setUnread(unreadCount(notifs))
   }
+
+  const loadUsersForSearch = useCallback(async () => {
+    try {
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.users), {
+        cache: "no-store",
+      })
+      const data = await res.json()
+      const list = normalizeUsersList(data)
+      setAllUsers(Array.isArray(list) ? list : [])
+    } catch {
+      setAllUsers([])
+    }
+  }, [])
 
   useEffect(() => {
     if (isAdmin) {
-      fetchNotifications()
-      const interval = setInterval(fetchNotifications, 10000)
-      return () => clearInterval(interval)
+      void fetchNotifications()
     }
-  }, [isAdmin])
+    void loadUsersForSearch()
+  }, [isAdmin, loadUsersForSearch])
 
-  const dismissNotification = (id: string) => {
-    setNotifications(prev => prev.filter(n => n.id !== id))
+  useEffect(() => {
+    const q = searchQuery.trim()
+    if (!q) {
+      setSearchHits([])
+      setSearchLoading(false)
+      return
+    }
+
+    setSearchLoading(true)
+    const timer = window.setTimeout(() => {
+      setSearchHits(filterSearchHits(allUsers, q))
+      setSearchLoading(false)
+    }, 250)
+
+    return () => window.clearTimeout(timer)
+  }, [searchQuery, allUsers])
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setSearchOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", onDocClick)
+    return () => document.removeEventListener("mousedown", onDocClick)
+  }, [])
+
+  const handleMarkAllRead = () => {
+    markAllNotificationsAsRead(notifications)
+    setUnread(0)
   }
 
-  const notifColor = (type: string) => {
-    if (type === "danger")  return "border-red-200 bg-red-50 text-red-700"
-    if (type === "warning") return "border-yellow-200 bg-yellow-50 text-yellow-700"
-    return "border-blue-200 bg-blue-50 text-blue-700"
+  const openNotificationsPage = () => {
+    onNavigate?.("/dashboard/notifications")
+  }
+
+  const goToSearchResult = (hit: PortalSearchHit) => {
+    const q = hit.extension !== "—" ? hit.extension : hit.name
+    setPortalPageSearch(q)
+    setSearchQuery(q)
+    setSearchOpen(false)
+
+    if (isAdmin) {
+      if (hit.kind === "user" && hit.name !== `Extension ${hit.extension}`) {
+        onNavigate?.("/dashboard/users")
+      } else {
+        onNavigate?.("/dashboard/extensions")
+      }
+    } else {
+      onNavigate?.("/dashboard/directory")
+    }
+  }
+
+  const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      setSearchOpen(false)
+      return
+    }
+    if (e.key === "Enter" && searchHits.length > 0) {
+      e.preventDefault()
+      goToSearchResult(searchHits[0])
+    }
   }
 
   return (
-    <header className="sticky top-0 z-50 flex h-16 items-center gap-4 border-b border-border bg-primary px-6">
-      <div className="flex items-center gap-3">
+    <header className="sticky top-0 z-50 flex h-16 items-center gap-4 border-b border-border bg-primary px-4 sm:px-6">
+      <div className="flex min-w-0 items-center gap-3">
         <Image
           src="/images/udsm-logo.png"
           alt="UDSM Logo"
           width={40}
           height={40}
-          className="rounded-full bg-primary-foreground p-0.5"
         />
         <div className="flex items-center gap-2">
-          <Shield className="h-5 w-5 text-secondary" />
           <h1 className="text-lg font-semibold text-primary-foreground hidden md:block">
             Secure VoIP Portal
           </h1>
@@ -145,87 +169,127 @@ export function TopNavbar() {
       </div>
 
       <div className="ml-auto flex items-center gap-4">
-        <div className="relative hidden md:block">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search users, extensions..."
-            className="w-64 bg-primary-foreground/10 pl-9 text-primary-foreground placeholder:text-primary-foreground/50 border-primary-foreground/20 focus:bg-primary-foreground/20"
+        <AsteriskConnectionIndicator variant="compact" />
+
+        <div ref={searchRef} className="relative hidden md:block">
+          <Search
+            className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-primary-foreground/60"
+            aria-hidden
           />
+          <Input
+            type="search"
+            role="combobox"
+            aria-expanded={searchOpen}
+            aria-controls="global-search-results"
+            aria-label="Search users and extensions"
+            placeholder="Search name or extension…"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value)
+              setSearchOpen(true)
+            }}
+            onFocus={() => setSearchOpen(true)}
+            onKeyDown={onSearchKeyDown}
+            className="w-72 rounded-xl border-primary-foreground/25 bg-primary-foreground/10 pl-9 text-primary-foreground placeholder:text-primary-foreground/55 focus-visible:border-secondary/60 focus-visible:bg-primary-foreground/15 focus-visible:ring-secondary/40"
+          />
+
+          {searchOpen && searchQuery.trim() && (
+            <div
+              id="global-search-results"
+              role="listbox"
+              className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-xl border border-border bg-card shadow-xl"
+            >
+              {searchLoading ? (
+                <p className="px-4 py-3 text-sm text-muted-foreground">Searching…</p>
+              ) : searchHits.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-muted-foreground">
+                  No users or extensions match &quot;{searchQuery.trim()}&quot;
+                </p>
+              ) : (
+                <ul className="max-h-72 overflow-y-auto py-1">
+                  {searchHits.map((hit) => (
+                    <li key={hit.id}>
+                      <button
+                        type="button"
+                        role="option"
+                        className="flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors hover:bg-muted/60"
+                        onClick={() => goToSearchResult(hit)}
+                      >
+                        <span
+                          className={cn(
+                            "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+                            hit.kind === "user"
+                              ? "bg-primary/10 text-primary"
+                              : "bg-secondary/20 text-secondary-foreground"
+                          )}
+                        >
+                          {hit.kind === "user" ? (
+                            <User className="h-4 w-4" />
+                          ) : (
+                            <Phone className="h-4 w-4" />
+                          )}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium text-foreground">
+                            {hit.name}
+                          </span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            Ext. {hit.extension}
+                            {hit.department ? ` · ${hit.department}` : ""}
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Notifications — Admin only */}
         {isAdmin && (
-          <div className="relative">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="hidden text-primary-foreground hover:bg-primary-foreground/10 sm:inline-flex"
+              onClick={handleMarkAllRead}
+              disabled={notifications.length === 0 || unread === 0}
+            >
+            </Button>
             <Button
               variant="ghost"
               size="icon"
               className="relative text-primary-foreground hover:bg-primary-foreground/10"
-              onClick={() => setShowNotifications(!showNotifications)}
+              onClick={openNotificationsPage}
+              aria-label="Open all notifications page"
             >
               <Bell className="h-5 w-5" />
-              {notifications.length > 0 && (
+              {unread > 0 && (
                 <Badge className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-destructive p-0 text-[10px] text-primary-foreground">
-                  {notifications.length}
+                  {unread}
                 </Badge>
               )}
             </Button>
-
-            {/* Notifications Dropdown */}
-            {showNotifications && (
-              <div className="absolute right-0 top-12 w-80 rounded-xl border border-border bg-card shadow-xl z-50">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-                  <p className="text-sm font-semibold text-foreground">
-                    Notifications ({notifications.length})
-                  </p>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => setShowNotifications(false)}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-                <div className="flex flex-col gap-2 p-3 max-h-80 overflow-y-auto">
-                  {notifications.length === 0 ? (
-                    <p className="text-sm text-muted-foreground text-center py-4">
-                      No notifications
-                    </p>
-                  ) : (
-                    notifications.map(n => (
-                      <div
-                        key={n.id}
-                        className={`flex items-start justify-between gap-2 rounded-lg border p-3 text-xs ${notifColor(n.type)}`}
-                      >
-                        <div>
-                          <p className="font-semibold">{n.title}</p>
-                          <p className="mt-0.5 opacity-80">{n.message}</p>
-                          <p className="mt-1 opacity-60">{n.time}</p>
-                        </div>
-                        <button
-                          onClick={() => dismissNotification(n.id)}
-                          className="opacity-60 hover:opacity-100 shrink-0"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="flex items-center gap-2 text-primary-foreground hover:bg-primary-foreground/10">
+            <Button
+              variant="ghost"
+              className="flex items-center gap-2 text-primary-foreground hover:bg-primary-foreground/10"
+            >
               <div className="flex h-8 w-8 items-center justify-center rounded-full bg-secondary text-sm font-semibold text-secondary-foreground">
                 {user?.name?.charAt(0) || "U"}
               </div>
               <div className="hidden text-left lg:block">
-                <p className="text-sm font-medium text-primary-foreground">{user?.name || "User"}</p>
-                <p className="text-xs text-primary-foreground/70 capitalize">{user?.role || "user"}</p>
+                <p className="text-sm font-medium text-primary-foreground">
+                  {user?.name || "User"}
+                </p>
+                <p className="text-xs text-primary-foreground/70 capitalize">
+                  {user?.role || "user"}
+                </p>
               </div>
               <ChevronDown className="h-4 w-4 text-primary-foreground/70" />
             </Button>
@@ -234,7 +298,9 @@ export function TopNavbar() {
             <div className="px-2 py-1.5">
               <p className="text-sm font-medium">{user?.name}</p>
               <p className="text-xs text-muted-foreground">{user?.email}</p>
-              <p className="text-xs text-muted-foreground font-mono mt-0.5">Ext. {user?.extension}</p>
+              <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                Ext. {user?.extension}
+              </p>
             </div>
             <DropdownMenuSeparator />
             <DropdownMenuItem>Profile</DropdownMenuItem>

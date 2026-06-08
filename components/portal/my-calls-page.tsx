@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { KpiCard } from "./kpi-card"
 import { StatusBadge } from "./status-badge"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
 import { useAuth } from "@/lib/auth-context"
 
 type CallRecord = {
@@ -34,7 +34,7 @@ export function MyCallsPage() {
   const fetchMyCalls = async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${ASTERISK_API}/realcdr`)
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.realcdr))
       const data = await res.json()
       if (Array.isArray(data)) {
         // Filter only calls involving this user's extension
@@ -51,9 +51,7 @@ export function MyCallsPage() {
   }
 
   useEffect(() => {
-    fetchMyCalls()
-    const interval = setInterval(fetchMyCalls, 10000)
-    return () => clearInterval(interval)
+    void fetchMyCalls()
   }, [user?.extension])
 
   const filtered = myCalls.filter((r) => {

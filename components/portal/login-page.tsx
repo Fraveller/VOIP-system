@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import Image from "next/image"
-import { Eye, EyeOff, Lock, Mail, Shield, AlertTriangle } from "lucide-react"
+import { Eye, EyeOff, Lock, Mail, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -46,7 +46,7 @@ export function LoginPage() {
 
       {/* Login card */}
       <div className="relative z-10 w-full max-w-[420px] px-4">
-        <div className="overflow-hidden rounded-xl bg-white shadow-2xl">
+        <div className="oval-smart-shape card-elevated overflow-hidden border border-primary/10 bg-card">
           {/* Card header */}
           <div className="flex flex-col items-center gap-3 px-8 pt-10 pb-2">
             <div className="flex h-[88px] w-[88px] items-center justify-center rounded-full bg-[#f8f9fb]">
@@ -72,7 +72,7 @@ export function LoginPage() {
           <div className="mx-8 my-4 h-px bg-gradient-to-r from-transparent via-[#f6b418] to-transparent" />
 
           {/* Form */}
-          <div className="px-8 pb-6">
+          <div className="px-8 pb-6 flex flex-col gap-4">
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               {isLocked && (
                 <div className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 p-3 text-[13px] text-red-700">

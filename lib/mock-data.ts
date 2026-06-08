@@ -111,35 +111,107 @@ export const directoryEntries = [
   { name: "James Mwakalinga", extension: "5010", department: "Library", presence: "available" },
 ]
 
-// ─── Live Asterisk Backend Config ────────────────────────────────────────────
-export const ASTERISK_API = "http://192.168.1.13:3001/api";
+// ─── Live Asterisk Backend Config (from .env.local via lib/env.ts) ───────────
+import {
+  ASTERISK_API,
+  ASTERISK_SIP_PORT,
+  ASTERISK_SIP_SERVER,
+} from "./env"
+import { apiUrl, BridgePaths } from "./bridge-paths"
+
+export { ASTERISK_API, ASTERISK_SIP_PORT, ASTERISK_SIP_SERVER }
+export { apiUrl, BridgePaths } from "./bridge-paths"
+
+/** Unwrap custom array APIs and Asterisk ARI (`{ endpoints: [...] }`). */
+export function normalizeEndpointsList(data: unknown): any[] | null {
+  if (data == null) return []
+  if (Array.isArray(data)) return data
+  if (typeof data === "object") {
+    const o = data as Record<string, unknown>
+    if (Array.isArray(o.endpoints)) return o.endpoints
+    if (Array.isArray(o.items)) return o.items
+    if (Array.isArray(o.data)) return o.data
+  }
+  return null
+}
+
+export function normalizeChannelsList(data: unknown): any[] | null {
+  if (data == null) return []
+  if (Array.isArray(data)) return data
+  if (typeof data === "object") {
+    const o = data as Record<string, unknown>
+    if (Array.isArray(o.channels)) return o.channels
+    if (Array.isArray(o.items)) return o.items
+    if (Array.isArray(o.data)) return o.data
+  }
+  return null
+}
+
+/** Portal users list from Asterisk HTTP bridge (`[]` or `{ users: [] }`). */
+export function normalizeUsersList(data: unknown): any[] | null {
+  if (data == null) return []
+  if (Array.isArray(data)) return data
+  if (typeof data === "object") {
+    const o = data as Record<string, unknown>
+    if (Array.isArray(o.users)) return o.users
+    if (Array.isArray(o.items)) return o.items
+    if (Array.isArray(o.data)) return o.data
+  }
+  return null
+}
+
+/**
+ * Next free numeric extension (1000–9999) when `/nextextension` is missing.
+ */
+export function suggestNextExtension(
+  users: { extension?: string }[],
+  endpointRows: { resource?: string; extension?: string }[]
+): string {
+  const used = new Set<string>()
+  for (const u of users) {
+    if (u?.extension != null && u.extension !== "") used.add(String(u.extension))
+  }
+  for (const ep of endpointRows) {
+    const r = ep?.resource ?? ep?.extension
+    if (r != null && r !== "") used.add(String(r))
+  }
+  for (let n = 1000; n <= 9999; n++) {
+    const s = String(n)
+    if (!used.has(s)) return s
+  }
+  return String(10000 + Math.floor(Math.random() * 89999))
+}
 
 // Fetch live endpoint statuses from Asterisk
-export async function fetchLiveEndpoints() {
+export async function fetchLiveEndpoints(): Promise<any[] | null> {
   try {
-    const res = await fetch(`${ASTERISK_API}/endpoints`);
-    const data = await res.json();
-    return data;
+    const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.endpoints))
+    const data = await res.json()
+    const list = normalizeEndpointsList(data)
+    if (list === null) return null
+    return list
   } catch {
-    return null;
+    return null
   }
 }
 
 // Fetch active calls from Asterisk
-export async function fetchActiveCalls() {
+export async function fetchActiveCalls(): Promise<any[] | null> {
   try {
-    const res = await fetch(`${ASTERISK_API}/channels`);
-    const data = await res.json();
-    return data;
+    const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.channels))
+    const data = await res.json()
+    const list = normalizeChannelsList(data)
+    if (list === null) return null
+    return list
   } catch {
-    return null;
+    return null
   }
 }
 
 // Fetch server info from Asterisk
 export async function fetchServerInfo() {
   try {
-    const res = await fetch(`${ASTERISK_API}/info`);
+    const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.info));
     const data = await res.json();
     return data;
   } catch {

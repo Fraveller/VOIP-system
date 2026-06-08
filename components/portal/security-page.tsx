@@ -1,13 +1,21 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { ShieldCheck, ShieldAlert, Lock, Globe, Trash2, RefreshCw } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { StatusBadge } from "./status-badge"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { toast } from "sonner"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
+import { useAsteriskHealth } from "@/hooks/use-asterisk-health"
+import {
+  getSecuritySettings,
+  normalizeSecuritySettings,
+  saveSecuritySettingsLocal,
+  type SecuritySettings,
+} from "@/lib/security-settings"
 
 type BlockedIP = {
   ip: string
@@ -34,10 +42,18 @@ type SecurityStatus = {
 }
 
 export function SecurityPage() {
+  const { status: health } = useAsteriskHealth(false)
+
+  const bridgeOk = useMemo(() => {
+    const k = health.kind
+    return k === "online" || k === "degraded"
+  }, [health])
+
+  const bridgeFullyOnline = health.kind === "online"
+
   const [blockedIPs, setBlockedIPs]         = useState<BlockedIP[]>([])
   const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([])
   const [activeSessions, setActiveSessions] = useState<any[]>([])
-  const [pbxOnline, setPbxOnline]           = useState(false)
   const [totalExt, setTotalExt]             = useState(0)
   const [registeredExt, setRegisteredExt]   = useState(0)
   const [lastRefresh, setLastRefresh]       = useState("—")
@@ -49,17 +65,31 @@ export function SecurityPage() {
     certExpiry:   "—",
     certDaysLeft: 0,
   })
+  const [loginSettings, setLoginSettings] = useState<SecuritySettings>(() =>
+    getSecuritySettings()
+  )
+  const [settingsSaving, setSettingsSaving] = useState(false)
+
+  const loadLoginSettings = async () => {
+    try {
+      const res = await fetch("/api/portal/security-settings", { cache: "no-store" })
+      if (res.ok) {
+        const data = normalizeSecuritySettings(await res.json())
+        setLoginSettings(data)
+        saveSecuritySettingsLocal(data)
+        return
+      }
+    } catch {
+      /* use local */
+    }
+    setLoginSettings(getSecuritySettings())
+  }
 
   const fetchSecurityData = async () => {
     setLoading(true)
     try {
-      // Check PBX status
-      const infoRes = await fetch(`${ASTERISK_API}/info`)
-      const infoData = await infoRes.json()
-      if (infoData?.system) setPbxOnline(true)
-
       // Get endpoints
-      const epRes = await fetch(`${ASTERISK_API}/endpoints`)
+      const epRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.endpoints))
       const endpoints = await epRes.json()
       if (Array.isArray(endpoints)) {
         setTotalExt(endpoints.length)
@@ -67,7 +97,7 @@ export function SecurityPage() {
       }
 
       // Get users for active sessions
-      const usersRes = await fetch(`${ASTERISK_API}/users`)
+      const usersRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users))
       const users = await usersRes.json()
       if (Array.isArray(users)) {
         const sessions = users
@@ -83,7 +113,7 @@ export function SecurityPage() {
       }
 
       // Get audit logs for security events
-      const auditRes = await fetch(`${ASTERISK_API}/audit`)
+      const auditRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.audit))
       const auditData = await auditRes.json()
       if (Array.isArray(auditData)) {
         const events: SecurityEvent[] = auditData.slice(0, 10).map((log: any) => ({
@@ -101,7 +131,7 @@ export function SecurityPage() {
       }
 
       // ─── Get live security/encryption status ───────────────────────────
-      const secRes = await fetch(`${ASTERISK_API}/security`)
+      const secRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.security))
       const secData = await secRes.json()
       if (secData && !secData.error) {
         setSecurityStatus({
@@ -113,19 +143,59 @@ export function SecurityPage() {
         })
       }
 
-    } catch {
-      setPbxOnline(false)
-    }
+    } catch { /* individual requests may fail; PBX reachability is from useAsteriskHealth */ }
 
     setLastRefresh(new Date().toLocaleTimeString())
     setLoading(false)
   }
 
   useEffect(() => {
-    fetchSecurityData()
-    const interval = setInterval(fetchSecurityData, 15000)
-    return () => clearInterval(interval)
+    void loadLoginSettings()
+    void fetchSecurityData()
   }, [])
+
+  const handleSaveLoginSettings = async () => {
+    setSettingsSaving(true)
+    const normalized = normalizeSecuritySettings(loginSettings)
+    try {
+      const portalRes = await fetch("/api/portal/security-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(normalized),
+      })
+      if (!portalRes.ok) {
+        toast.error("Could not save settings", {
+          description: "Portal storage rejected the update.",
+        })
+        setSettingsSaving(false)
+        return
+      }
+
+      saveSecuritySettingsLocal(normalized)
+      setLoginSettings(normalized)
+
+      try {
+        await fetch(apiUrl(ASTERISK_API, BridgePaths.security), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            maxFailedLoginAttempts: normalized.maxFailedLoginAttempts,
+            lockoutDurationSec: normalized.lockoutDurationSec,
+            sessionTimeoutMinutes: normalized.sessionTimeoutMinutes,
+          }),
+        })
+      } catch {
+        /* PBX bridge may not support POST; portal settings still apply */
+      }
+
+      toast.success("Security settings saved", {
+        description: `Login lockout and ${normalized.sessionTimeoutMinutes} min session timeout are now active.`,
+      })
+    } catch {
+      toast.error("Save failed", { description: "Cannot reach the portal API." })
+    }
+    setSettingsSaving(false)
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -154,15 +224,51 @@ export function SecurityPage() {
           <CardContent className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
               <Label className="text-sm">Max Failed Login Attempts</Label>
-              <Input type="number" defaultValue={5} className="w-32" />
+              <Input
+                type="number"
+                min={3}
+                max={20}
+                className="w-32"
+                value={loginSettings.maxFailedLoginAttempts}
+                onChange={(e) =>
+                  setLoginSettings((s) => ({
+                    ...s,
+                    maxFailedLoginAttempts: Number(e.target.value) || 5,
+                  }))
+                }
+              />
             </div>
             <div className="flex flex-col gap-2">
               <Label className="text-sm">Lockout Duration (seconds)</Label>
-              <Input type="number" defaultValue={30} className="w-32" />
+              <Input
+                type="number"
+                min={10}
+                max={3600}
+                className="w-32"
+                value={loginSettings.lockoutDurationSec}
+                onChange={(e) =>
+                  setLoginSettings((s) => ({
+                    ...s,
+                    lockoutDurationSec: Number(e.target.value) || 30,
+                  }))
+                }
+              />
             </div>
             <div className="flex flex-col gap-2">
               <Label className="text-sm">Session Timeout (minutes)</Label>
-              <Input type="number" defaultValue={30} className="w-32" />
+              <Input
+                type="number"
+                min={5}
+                max={480}
+                className="w-32"
+                value={loginSettings.sessionTimeoutMinutes}
+                onChange={(e) =>
+                  setLoginSettings((s) => ({
+                    ...s,
+                    sessionTimeoutMinutes: Number(e.target.value) || 30,
+                  }))
+                }
+              />
             </div>
             <div className="flex flex-col gap-2">
               <Label className="text-sm">Password Policy</Label>
@@ -170,8 +276,13 @@ export function SecurityPage() {
                 ✅ Min 8 chars · 1 uppercase · 1 number · 1 special character
               </div>
             </div>
-            <Button className="w-fit bg-primary text-primary-foreground hover:bg-primary/90">
-              Save Settings
+            <Button
+              type="button"
+              className="w-fit bg-primary text-primary-foreground hover:bg-primary/90"
+              disabled={settingsSaving}
+              onClick={() => void handleSaveLoginSettings()}
+            >
+              {settingsSaving ? "Saving…" : "Save Settings"}
             </Button>
           </CardContent>
         </Card>
@@ -187,7 +298,20 @@ export function SecurityPage() {
           <CardContent className="flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <span className="text-sm">Asterisk PBX</span>
-              <StatusBadge label={pbxOnline ? "Online" : "Offline"} variant={pbxOnline ? "success" : "danger"} />
+              <StatusBadge
+                label={
+                  health.kind === "checking"
+                    ? "Checking…"
+                    : bridgeFullyOnline
+                      ? "Online"
+                      : bridgeOk
+                        ? "Degraded"
+                        : "Offline"
+                }
+                variant={
+                  bridgeFullyOnline ? "success" : bridgeOk ? "warning" : health.kind === "checking" ? "neutral" : "danger"
+                }
+              />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm">UFW Firewall</span>

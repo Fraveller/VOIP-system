@@ -6,7 +6,15 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { StatusBadge } from "./status-badge"
-import { fetchLiveEndpoints, ASTERISK_API } from "@/lib/mock-data"
+import {
+  fetchLiveEndpoints,
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+} from "@/lib/mock-data"
+import { usePbxHost } from "@/hooks/use-pbx-host"
+import { dialExtension } from "@/lib/sip-dial"
+import { consumePortalPageSearch } from "@/lib/portal-search"
 
 type DirectoryEntry = {
   name: string
@@ -27,6 +35,7 @@ const presenceVariant = (presence: string) => {
 }
 
 export function LiveDirectory() {
+  const { sipHost } = usePbxHost()
   const [search, setSearch]           = useState("")
   const [directory, setDirectory]     = useState<DirectoryEntry[]>([])
   const [lastRefresh, setLastRefresh] = useState("—")
@@ -38,32 +47,36 @@ export function LiveDirectory() {
     // Fetch users from server storage
     let serverUsers: any[] = []
     try {
-      const usersRes = await fetch(`${ASTERISK_API}/users`)
-      serverUsers = await usersRes.json()
+      const usersRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users))
+      const raw = await usersRes.json()
+      serverUsers = Array.isArray(raw) ? raw : []
     } catch { }
 
-    // Fetch live endpoints from Asterisk
     const liveData = await fetchLiveEndpoints()
+    const liveList = Array.isArray(liveData) ? liveData : []
+    const extOf = (ep: any) => String(ep?.resource ?? ep?.extension ?? "").trim()
 
-    if (liveData) {
-      const merged: DirectoryEntry[] = liveData.map((ep: any) => {
-        const matchedUser = serverUsers.find((u: any) => u.extension === ep.resource)
-        return {
-          name:       matchedUser?.name       ?? `Extension ${ep.resource}`,
-          extension:  ep.resource,
-          department: matchedUser?.department ?? "—",
-          presence:   ep.state === "online" ? "available" : "offline",
-        }
-      })
+    if (liveList.length > 0) {
+      const merged: DirectoryEntry[] = liveList
+        .map((ep: any) => {
+          const ext = extOf(ep)
+          const matchedUser = serverUsers.find((u: any) => String(u.extension) === ext)
+          return {
+            name: matchedUser?.name ?? (ext ? `Extension ${ext}` : "Unknown"),
+            extension: ext,
+            department: matchedUser?.department ?? "—",
+            presence: ep.state === "online" ? "available" : "offline",
+          }
+        })
+        .filter((e) => e.extension.length > 0)
       setDirectory(merged)
     } else {
-      // Fallback — show server users as offline if Asterisk unreachable
       setDirectory(
         serverUsers.map((u: any) => ({
-          name:       u.name,
-          extension:  u.extension,
+          name: u.name,
+          extension: String(u.extension ?? ""),
           department: u.department,
-          presence:   "offline",
+          presence: "offline",
         }))
       )
     }
@@ -73,10 +86,14 @@ export function LiveDirectory() {
   }
 
   useEffect(() => {
-    fetchDirectory()
-    const interval = setInterval(fetchDirectory, 5000)
-    return () => clearInterval(interval)
+    void fetchDirectory()
+    const preset = consumePortalPageSearch()
+    if (preset) setSearch(preset)
   }, [])
+
+  const handleCall = (extension: string) => {
+    dialExtension(extension, sipHost)
+  }
 
   const filtered = directory.filter((e) =>
     e.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -97,13 +114,7 @@ export function LiveDirectory() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs text-green-500">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-500 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500" />
-            </span>
-            Live — refreshes every 5s
-          </span>
+          
           <Button variant="outline" size="sm" onClick={fetchDirectory}>
             <RefreshCw className="mr-1 h-3.5 w-3.5" />
             Refresh
@@ -181,7 +192,8 @@ export function LiveDirectory() {
                         <Button
                           size="sm"
                           className="bg-primary text-primary-foreground hover:bg-primary/90"
-                          disabled={entry.presence === "offline"}
+                          onClick={() => handleCall(entry.extension)}
+                          title={`Call ${entry.extension} via installed softphone`}
                         >
                           <Phone className="mr-1 h-3.5 w-3.5" />
                           Call

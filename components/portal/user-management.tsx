@@ -9,7 +9,19 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { StatusBadge } from "./status-badge"
-import { departments, ASTERISK_API, fetchLiveEndpoints } from "@/lib/mock-data"
+import {
+  departments,
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+  fetchLiveEndpoints,
+  suggestNextExtension,
+} from "@/lib/mock-data"
+import {
+  usersFromApiRead,
+  userFromCreateResponse,
+  nextExtensionFromRead,
+} from "@/lib/asterisk-users"
 import {
   Dialog,
   DialogContent,
@@ -17,6 +29,9 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog"
+import { readJsonResponse, formatApiFailure } from "@/lib/api-client"
+import { buildExtensionPostBody } from "@/lib/extension-create-payload"
+import { consumePortalPageSearch } from "@/lib/portal-search"
 
 type User = {
   id: string
@@ -65,13 +80,36 @@ export function UserManagement() {
     return `UDSM${special}${extension}#${randomNum}`
   }
 
-  // ─── Load users ───────────────────────────────────────────────────────────
+  const rowToUser = (u: unknown): User => {
+    const r = u as Record<string, unknown>
+    return {
+      id: String(r.id ?? ""),
+      name: String(r.name ?? ""),
+      email: String(r.email ?? ""),
+      department: String(r.department ?? ""),
+      role: String(r.role ?? "user"),
+      extension: String(r.extension ?? ""),
+      status: String(r.status ?? "active"),
+      lastLogin: String(r.lastLogin ?? "—"),
+      online: false,
+      mustChangePassword: Boolean(r.mustChangePassword),
+    }
+  }
+
+  // ─── Load users from Asterisk HTTP bridge (PBX database via your API) ─────
   const loadUsers = async () => {
     setPageLoading(true)
     try {
-      const res = await fetch(`${ASTERISK_API}/users`)
-      const data = await res.json()
-      if (Array.isArray(data)) setUsersList(data)
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.users), {
+        cache: "no-store",
+      })
+      const parsed = await readJsonResponse(res)
+      const rows = usersFromApiRead(parsed)
+      if (res.ok) {
+        setUsersList(rows.map(rowToUser))
+      } else {
+        setUsersList([])
+      }
     } catch {
       setUsersList([])
     }
@@ -81,32 +119,59 @@ export function UserManagement() {
   // ─── Sync online status ───────────────────────────────────────────────────
   const syncOnlineStatus = async () => {
     const endpoints = await fetchLiveEndpoints()
-    if (endpoints) {
-      setUsersList(prev => prev.map(u => {
-        const ep = endpoints.find((e: any) => e.resource === u.extension)
-        return ep ? { ...u, online: ep.state === "online" } : { ...u, online: false }
-      }))
-    }
+    const list = Array.isArray(endpoints) ? endpoints : []
+    setUsersList(prev =>
+      prev.map(u => {
+        const ep = list.find(
+          (e: any) =>
+            String(e.resource ?? e.extension) === String(u.extension)
+        )
+        return ep
+          ? { ...u, online: ep.state === "online" }
+          : { ...u, online: false }
+      })
+    )
     setLastRefresh(new Date().toLocaleTimeString())
   }
 
   useEffect(() => {
-    loadUsers().then(() => syncOnlineStatus())
-    const interval = setInterval(syncOnlineStatus, 5000)
-    return () => clearInterval(interval)
+    void loadUsers().then(() => syncOnlineStatus())
+    const preset = consumePortalPageSearch()
+    if (preset) setSearch(preset)
   }, [])
 
-  // ─── Fetch next extension ─────────────────────────────────────────────────
+  // ─── Next extension: Asterisk bridge first, then client-side suggestion ──
   const fetchNextExtension = async () => {
     try {
-      const res = await fetch(`${ASTERISK_API}/nextextension`)
-      const data = await res.json()
-      const ext = data.next
-      setForm(f => ({ ...f, extension: ext }))
-      setGeneratedPassword(generatePassword(ext))
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.nextExtension), {
+        cache: "no-store",
+      })
+      const parsed = await readJsonResponse(res)
+      const next = nextExtensionFromRead(parsed)
+      if (res.ok && next) {
+        setForm((f) => ({ ...f, extension: next }))
+        setGeneratedPassword(generatePassword(next))
+        return
+      }
     } catch {
-      setForm(f => ({ ...f, extension: "1005" }))
-      setGeneratedPassword(generatePassword("1005"))
+      /* fallback */
+    }
+
+    try {
+      const usersRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users), {
+        cache: "no-store",
+      })
+      const parsed = await readJsonResponse(usersRes)
+      const rawUsers = usersFromApiRead(parsed)
+      const users = rawUsers.map((u) => rowToUser(u))
+      const eps = await fetchLiveEndpoints()
+      const epRows = Array.isArray(eps) ? eps : []
+      const next = suggestNextExtension(users, epRows)
+      setForm((f) => ({ ...f, extension: next }))
+      setGeneratedPassword(generatePassword(next))
+    } catch {
+      setForm((f) => ({ ...f, extension: "1000" }))
+      setGeneratedPassword(generatePassword("1000"))
     }
   }
 
@@ -145,35 +210,50 @@ export function UserManagement() {
     }
     setEditLoading(true)
     setEditError("")
+    const uid = editingUser?.id
+    if (!uid) {
+      setEditLoading(false)
+      return
+    }
+
     try {
-      const res = await fetch(`${ASTERISK_API}/users/${editingUser?.id}`, {
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.users, uid), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name:       editForm.name,
-          email:      editForm.email,
+          name: editForm.name,
+          email: editForm.email,
           department: editForm.department,
-          role:       editForm.role,
+          role: editForm.role,
         }),
       })
-      const data = await res.json()
-      if (!res.ok) {
-        setEditError(data.error || "Failed to update user")
-      } else {
-        setUsersList(prev =>
-          prev.map(u => u.id === editingUser?.id
-            ? { ...u, name: editForm.name, email: editForm.email, department: editForm.department, role: editForm.role }
-            : u
+      const parsed = await readJsonResponse(res)
+      if (res.ok) {
+        const merged = userFromCreateResponse(parsed, {
+          ...editingUser,
+          name: editForm.name,
+          email: editForm.email,
+          department: editForm.department,
+          role: editForm.role,
+        } as Record<string, unknown>)
+        const u = rowToUser(merged)
+        setUsersList((prev) =>
+          prev.map((row) =>
+            row.id === uid ? { ...row, ...u } : row
           )
         )
-        setEditSuccess("✅ User updated successfully!")
+        setEditSuccess("✅ User updated on Asterisk.")
         setTimeout(() => {
           setShowEditModal(false)
           setEditSuccess("")
         }, 1500)
+      } else {
+        setEditError(
+          formatApiFailure(res, parsed.object, parsed.text, "Failed to update user")
+        )
       }
     } catch {
-      setEditError("Cannot connect to server.")
+      setEditError("Cannot reach the Asterisk API.")
     }
     setEditLoading(false)
   }
@@ -184,57 +264,114 @@ export function UserManagement() {
       setError("Please fill in all required fields")
       return
     }
+    if (!form.extension?.trim()) {
+      setError("Extension is not ready yet — wait a moment or reopen Add User.")
+      return
+    }
     setLoading(true)
     setError("")
     setSuccess("")
-    try {
-      const password = generatedPassword || generatePassword(form.extension)
+    const password = generatedPassword || generatePassword(form.extension)
+    const newUser: User = {
+      id: String(Date.now()),
+      name: form.name,
+      email: form.email,
+      department: form.department,
+      role: form.role,
+      extension: form.extension.trim(),
+      status: "active",
+      lastLogin: new Date().toISOString().slice(0, 16).replace("T", " "),
+      online: false,
+      password,
+      mustChangePassword: true,
+    }
 
-      const extRes = await fetch(`${ASTERISK_API}/extensions`, {
+    const finishSuccess = (msg: string) => {
+      setSuccess(msg)
+      setForm({
+        name: "",
+        email: "",
+        department: "",
+        role: "user",
+        extension: "",
+        remoteAccess: false,
+      })
+      setGeneratedPassword("")
+      fetchNextExtension()
+      setTimeout(() => {
+        setShowModal(false)
+        setSuccess("")
+      }, 8000)
+    }
+
+    try {
+      const extRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.extensions), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ extension: form.extension, password }),
+        body: JSON.stringify(buildExtensionPostBody(newUser.extension, password)),
       })
-      const extData = await extRes.json()
+      const extParsed = await readJsonResponse(extRes)
       if (!extRes.ok) {
-        setError(extData.error || "Failed to create extension on Asterisk")
+        setError(
+          formatApiFailure(
+            extRes,
+            extParsed.object,
+            extParsed.text,
+            "Failed to create SIP extension on Asterisk (POST /extensions)"
+          )
+        )
         setLoading(false)
         return
       }
 
-      const newUser: User = {
-        id: String(Date.now()),
-        name: form.name,
-        email: form.email,
-        department: form.department,
-        role: form.role,
-        extension: form.extension,
-        status: "active",
-        lastLogin: new Date().toISOString().slice(0, 16).replace("T", " "),
-        online: false,
-        password: password,
-        mustChangePassword: true,
-      }
-
-      const userRes = await fetch(`${ASTERISK_API}/users`, {
+      const userRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(newUser),
       })
+      const userParsed = await readJsonResponse(userRes)
 
-      if (userRes.ok) {
-        setUsersList(prev => [...prev, newUser])
-        setSuccess(
-          `✅ User created!\nExtension: ${form.extension}\nPassword: ${password}\n⚠️ User must change password on first login.`
+      if (userRes.status === 409) {
+        setError(
+          typeof userParsed.object?.error === "string"
+            ? String(userParsed.object.error)
+            : "A user with this email already exists."
         )
+        setLoading(false)
+        return
       }
 
-      setForm({ name: "", email: "", department: "", role: "user", extension: "", remoteAccess: false })
-      setGeneratedPassword("")
-      fetchNextExtension()
-      setTimeout(() => { setShowModal(false); setSuccess("") }, 5000)
-    } catch {
-      setError("Cannot connect to Asterisk backend.")
+      if (!userRes.ok) {
+        setError(
+          formatApiFailure(
+            userRes,
+            userParsed.object,
+            userParsed.text,
+            "Failed to create portal user on Asterisk (POST /users)"
+          )
+        )
+        setLoading(false)
+        return
+      }
+
+      const merged = userFromCreateResponse(userParsed, newUser as unknown as Record<string, unknown>)
+      const created = rowToUser(merged)
+
+      setUsersList((prev) => {
+        const key = created.email.trim().toLowerCase()
+        const rest = prev.filter((u) => u.email.trim().toLowerCase() !== key)
+        return [...rest, { ...created, online: false }]
+      })
+
+      finishSuccess(
+        `✅ User created on Asterisk backend.\nExtension: ${created.extension}\nPassword: ${password}\n⚠️ User must change password on first login.`
+      )
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? `Cannot reach Asterisk API: ${e.message}`
+          : "Cannot reach Asterisk API."
+      )
     }
     setLoading(false)
   }
@@ -244,16 +381,24 @@ export function UserManagement() {
     const newStatus = user.status === "active" ? "suspended" : "active"
     if (!confirm(`${newStatus === "suspended" ? "Suspend" : "Activate"} ${user.name}?`)) return
     try {
-      await fetch(`${ASTERISK_API}/users/${user.id}`, {
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.users, user.id), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus, online: false }),
+        body: JSON.stringify({ status: newStatus }),
       })
-      setUsersList(prev =>
-        prev.map(u => u.id === user.id ? { ...u, status: newStatus, online: false } : u)
-      )
+      if (res.ok) {
+        setUsersList((prev) =>
+          prev.map((u) =>
+            u.id === user.id
+              ? { ...u, status: newStatus, online: false }
+              : u
+          )
+        )
+      } else {
+        alert("Failed to update status on Asterisk API.")
+      }
     } catch {
-      alert("Failed to update user status")
+      alert("Cannot reach Asterisk API.")
     }
   }
 
@@ -261,36 +406,68 @@ export function UserManagement() {
   const handleDelete = async (user: User) => {
     if (!confirm(`Permanently delete ${user.name} (Ext. ${user.extension}) from portal and Asterisk?\n\nThis cannot be undone.`)) return
     try {
-      await fetch(`${ASTERISK_API}/extensions/${user.extension}`, { method: "DELETE" })
-      await fetch(`${ASTERISK_API}/users/${user.id}`, { method: "DELETE" })
-      setUsersList(prev => prev.filter(u => u.id !== user.id))
+      const extDel = await fetch(
+        apiUrl(
+          ASTERISK_API,
+          BridgePaths.extensions,
+          encodeURIComponent(user.extension)
+        ),
+        { method: "DELETE" }
+      )
+      const userDel = await fetch(apiUrl(ASTERISK_API, BridgePaths.users, user.id), {
+        method: "DELETE",
+      })
+      if (userDel.ok) {
+        setUsersList((prev) => prev.filter((u) => u.id !== user.id))
+      } else {
+        alert(
+          `Delete incomplete (extension HTTP ${extDel.status}, user HTTP ${userDel.status}).`
+        )
+      }
     } catch {
-      alert("Cannot connect to Asterisk backend.")
+      alert("Cannot reach Asterisk API.")
     }
   }
 
+  const openAddUser = () => {
+    setShowModal(true)
+    void fetchNextExtension()
+  }
+
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 pb-20 sm:pb-0">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-foreground">User Management</h2>
           <p className="text-sm text-muted-foreground">
-            Manage portal users · Live sync from Asterisk · {lastRefresh}
+            Users from Asterisk HTTP API (your bridge → PBX DB) · {lastRefresh}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="hidden items-center gap-2 sm:flex">
           <Button variant="outline" size="sm" onClick={() => { loadUsers(); syncOnlineStatus(); }}>
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
           <Button
-            onClick={() => { setShowModal(true); fetchNextExtension(); }}
-            className="bg-primary text-primary-foreground hover:bg-primary/90"
+            onClick={openAddUser}
+            className="bg-secondary font-semibold text-secondary-foreground shadow-md ring-2 ring-secondary/40 hover:bg-secondary/90"
           >
             <Plus className="mr-2 h-4 w-4" />
             Add User
           </Button>
         </div>
+      </div>
+
+      <div className="flex gap-2 sm:hidden">
+        <Button
+          variant="outline"
+          size="sm"
+          className="flex-1"
+          onClick={() => { loadUsers(); syncOnlineStatus(); }}
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Refresh
+        </Button>
       </div>
 
       {/* Stats */}
@@ -352,8 +529,19 @@ export function UserManagement() {
           {pageLoading ? (
             <div className="p-8 text-center text-muted-foreground text-sm">Loading users from server...</div>
           ) : usersList.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground text-sm">
-              No users yet. Click <strong>Add User</strong> to create the first user.
+            <div className="flex flex-col items-center gap-4 p-8 text-center text-muted-foreground text-sm">
+              <p>No users yet. Create the first portal user below.</p>
+              <Button
+                onClick={openAddUser}
+                size="lg"
+                className="h-12 rounded-xl bg-secondary px-8 font-bold text-secondary-foreground shadow-lg ring-2 ring-secondary/50 hover:bg-secondary/90 sm:hidden"
+              >
+                <Plus className="mr-2 h-5 w-5" />
+                Add New User
+              </Button>
+              <p className="hidden sm:block">
+                Click <strong>Add User</strong> above to get started.
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -509,6 +697,16 @@ export function UserManagement() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Button
+        type="button"
+        onClick={openAddUser}
+        aria-label="Add new user"
+        className="fixed bottom-5 left-4 right-4 z-40 flex h-14 items-center justify-center gap-2 rounded-2xl bg-secondary text-base font-bold text-secondary-foreground shadow-[0_8px_24px_rgba(0,0,0,0.25)] ring-2 ring-secondary/60 hover:bg-secondary/90 sm:hidden"
+      >
+        <Plus className="h-6 w-6" />
+        Add New User
+      </Button>
 
       {/* ── Add User Modal ──────────────────────────────────────────────────── */}
       <Dialog open={showModal} onOpenChange={setShowModal}>

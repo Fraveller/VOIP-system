@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Users, Phone, PhoneCall, Globe, ShieldCheck, Wifi, Clock, AlertTriangle, RefreshCw } from "lucide-react"
+import { Users, Phone, PhoneCall, Globe, ShieldCheck, Clock, AlertTriangle } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { KpiCard } from "./kpi-card"
 import { StatusBadge } from "./status-badge"
@@ -9,7 +9,13 @@ import {
   BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from "recharts"
-import { ASTERISK_API, fetchLiveEndpoints, fetchActiveCalls, fetchServerInfo } from "@/lib/mock-data"
+import {
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+  fetchLiveEndpoints,
+  fetchActiveCalls,
+} from "@/lib/mock-data"
 
 const COLORS = ["var(--primary)", "var(--secondary)"]
 
@@ -18,8 +24,6 @@ export function AdminDashboard() {
   const [totalExt, setTotalExt]           = useState(0)
   const [registeredExt, setRegisteredExt] = useState(0)
   const [activeCalls, setActiveCalls]     = useState(0)
-  const [pbxOnline, setPbxOnline]         = useState(false)
-  const [pbxVersion, setPbxVersion]       = useState("—")
   const [uptime, setUptime]               = useState("—")
   const [auditLogs, setAuditLogs]         = useState<any[]>([])
   const [lastRefresh, setLastRefresh]     = useState("—")
@@ -29,31 +33,27 @@ export function AdminDashboard() {
 
   const fetchAll = async () => {
     try {
-      // Endpoints
       const endpoints = await fetchLiveEndpoints()
-      if (endpoints) {
+      if (Array.isArray(endpoints)) {
         setTotalExt(endpoints.length)
         setRegisteredExt(endpoints.filter((e: any) => e.state === "online").length)
-        setPbxOnline(true)
       } else {
-        setPbxOnline(false)
+        setTotalExt(0)
+        setRegisteredExt(0)
       }
 
       // Active calls
       const channels = await fetchActiveCalls()
-      if (channels) setActiveCalls(channels.length)
-
-      // Server info
-      const info = await fetchServerInfo()
-      if (info) setPbxVersion(info.system?.version ?? "—")
+      if (Array.isArray(channels)) setActiveCalls(channels.length)
+      else setActiveCalls(0)
 
       // System uptime
-      const sysRes = await fetch(`${ASTERISK_API}/system`)
+      const sysRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.system))
       const sysData = await sysRes.json()
       if (sysData) setUptime(sysData.uptime)
 
       // Users count
-      const usersRes = await fetch(`${ASTERISK_API}/users`)
+      const usersRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users))
       const usersData = await usersRes.json()
       if (Array.isArray(usersData)) {
         setTotalUsers(usersData.length)
@@ -65,10 +65,13 @@ export function AdminDashboard() {
           deptMap[dept] = (deptMap[dept] || 0) + 1
         })
         setDeptData(Object.entries(deptMap).map(([department, count]) => ({ department, count })))
+      } else {
+        setTotalUsers(0)
+        setDeptData([])
       }
 
       // Audit logs
-      const auditRes = await fetch(`${ASTERISK_API}/audit`)
+      const auditRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.audit))
       const auditData = await auditRes.json()
       if (Array.isArray(auditData)) setAuditLogs(auditData)
 
@@ -77,15 +80,19 @@ export function AdminDashboard() {
   }
 
   useEffect(() => {
-    fetchAll()
-    const interval = setInterval(fetchAll, 5000)
-    return () => clearInterval(interval)
+    void fetchAll()
   }, [])
+
+  const safeTotalExt = Number.isFinite(totalExt) ? totalExt : 0
+  const safeRegisteredExt = Number.isFinite(registeredExt) ? registeredExt : 0
+  const safeUnregisteredExt = Math.max(0, safeTotalExt - safeRegisteredExt)
+  const safeActiveCalls = Number.isFinite(activeCalls) ? activeCalls : 0
+  const safeTotalUsers = Number.isFinite(totalUsers) ? totalUsers : 0
 
   // Network ratio — registered vs unregistered
   const networkRatio = [
-    { name: "Registered", value: registeredExt },
-    { name: "Unregistered", value: totalExt - registeredExt },
+    { name: "Registered", value: safeRegisteredExt },
+    { name: "Unregistered", value: safeUnregisteredExt },
   ]
 
   return (
@@ -97,18 +104,14 @@ export function AdminDashboard() {
             VoIP system overview and real-time monitoring · {lastRefresh}
           </p>
         </div>
-        <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium border ${pbxOnline ? "bg-green-500/10 border-green-500/30 text-green-500" : "bg-red-500/10 border-red-500/30 text-red-500"}`}>
-          <span className={`h-2 w-2 rounded-full ${pbxOnline ? "bg-green-500" : "bg-red-500"}`} />
-          {pbxOnline ? `Asterisk ${pbxVersion} — Online` : "PBX Offline"}
-        </div>
       </div>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard title="Total Users"       value={totalUsers}                    icon={Users}    trend="Registered in portal" trendUp />
-        <KpiCard title="Total Extensions"  value={totalExt}                      icon={Phone}    trend={`${totalExt - registeredExt} unregistered`} />
-        <KpiCard title="Active Calls"      value={activeCalls}                   icon={PhoneCall} trend="Live from Asterisk" trendUp />
-        <KpiCard title="Registered Now"    value={registeredExt}                 icon={Globe}    trend={`of ${totalExt} extensions`} trendUp />
+        <KpiCard title="Total Users"       value={safeTotalUsers}                icon={Users}    trend="Registered in portal" trendUp />
+        <KpiCard title="Total Extensions"  value={safeTotalExt}                  icon={Phone}    trend={`${safeUnregisteredExt} unregistered`} />
+        <KpiCard title="Active Calls"      value={safeActiveCalls}               icon={PhoneCall} trend="Live from Asterisk" trendUp />
+        <KpiCard title="Registered Now"    value={safeRegisteredExt}             icon={Globe}    trend={`of ${safeTotalExt} extensions`} trendUp />
       </div>
 
       {/* Charts Row */}
@@ -176,13 +179,6 @@ export function AdminDashboard() {
           <CardContent className="flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Wifi className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm">PBX Status</span>
-              </div>
-              <StatusBadge label={pbxOnline ? "Online" : "Offline"} variant={pbxOnline ? "success" : "danger"} />
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
                 <ShieldCheck className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm">TLS/SRTP</span>
               </div>
@@ -200,15 +196,15 @@ export function AdminDashboard() {
                 <Phone className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm">Active Calls</span>
               </div>
-              <span className="text-sm font-medium text-foreground">{activeCalls}</span>
+              <span className="text-sm font-medium text-foreground">{safeActiveCalls}</span>
             </div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm">Unregistered Ext.</span>
               </div>
-              <span className={`text-sm font-medium ${totalExt - registeredExt > 0 ? "text-destructive" : "text-green-500"}`}>
-                {totalExt - registeredExt}
+              <span className={`text-sm font-medium ${safeUnregisteredExt > 0 ? "text-destructive" : "text-green-500"}`}>
+                {safeUnregisteredExt}
               </span>
             </div>
           </CardContent>

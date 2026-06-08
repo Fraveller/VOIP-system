@@ -1,16 +1,40 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Search, Eye, Settings, RefreshCw } from "lucide-react"
-import { Card, CardContent } from "@/components/ui/card"
+import { useMemo, useState, useEffect } from "react"
+import { Search, Eye, Trash2, RefreshCw, UserPlus, RotateCcw } from "lucide-react"
+import { toast } from "sonner"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { StatusBadge } from "./status-badge"
-import { fetchLiveEndpoints, ASTERISK_API } from "@/lib/mock-data"
+import {
+  departments,
+  fetchLiveEndpoints,
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+} from "@/lib/mock-data"
+import { buildExtensionPostBody } from "@/lib/extension-create-payload"
+import {
+  clearFreedExtension,
+  listFreedExtensions,
+  recordFreedExtension,
+} from "@/lib/freed-extensions"
+import { readJsonResponse } from "@/lib/api-client"
+import { consumePortalPageSearch } from "@/lib/portal-search"
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -26,12 +50,42 @@ type LiveEndpoint = {
   state: string
 }
 
+type PortalUser = {
+  id: string
+  name: string
+  email: string
+  department: string
+  extension: string
+  role: string
+}
+
+function generateExtensionPassword(extension: string) {
+  const randomNum = Math.floor(1000 + Math.random() * 9000)
+  const specials = ["@", "#", "!", "$", "%"]
+  const special = specials[Math.floor(Math.random() * specials.length)]
+  return `UDSM${special}${extension}#${randomNum}`
+}
+
 export function ExtensionManagement() {
   const [search, setSearch] = useState("")
   const [selectedExt, setSelectedExt] = useState<LiveEndpoint | null>(null)
   const [endpoints, setEndpoints] = useState<LiveEndpoint[]>([])
   const [loading, setLoading] = useState(true)
   const [lastRefresh, setLastRefresh] = useState("—")
+  const [portalUsers, setPortalUsers] = useState<PortalUser[]>([])
+  const [freedExts, setFreedExts] = useState<string[]>([])
+  const [showReconfigure, setShowReconfigure] = useState(false)
+  const [reconfigLoading, setReconfigLoading] = useState(false)
+  const [reconfig, setReconfig] = useState({
+    extension: "",
+    assignMode: "existing" as "existing" | "new",
+    userId: "",
+    name: "",
+    email: "",
+    department: departments[0] ?? "",
+    role: "user",
+    password: "",
+  })
 
   // ─── Fetch live endpoints from Asterisk ──────────────────────────────────
 const fetchEndpoints = async () => {
@@ -40,52 +94,261 @@ const fetchEndpoints = async () => {
     // Fetch users from server
     let serverUsers: any[] = []
     try {
-      const usersRes = await fetch(`${ASTERISK_API}/users`)
-      serverUsers = await usersRes.json()
+      const usersRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users))
+      const rawUsers = await usersRes.json()
+      serverUsers = Array.isArray(rawUsers) ? rawUsers : []
     } catch { }
 
     const liveData = await fetchLiveEndpoints()
-    if (liveData) {
-      const merged: LiveEndpoint[] = liveData.map((ep: any) => {
-        const matchedUser = serverUsers.find((u: any) => u.extension === ep.resource)
-        return {
-          extension: ep.resource,
-          assignedUser: matchedUser?.name ?? "Unassigned",
-          department: matchedUser?.department ?? "—",
-          registrationStatus: ep.state === "online" ? "registered" : "unregistered",
+    const liveList = Array.isArray(liveData) ? liveData : []
+
+    const extKey = (ep: any) => String(ep?.resource ?? ep?.extension ?? "").trim()
+
+    let merged: LiveEndpoint[] = []
+    if (liveList.length > 0) {
+      merged = liveList
+        .map((ep: any) => {
+          const ext = extKey(ep)
+          const matchedUser = serverUsers.find(
+            (u: any) => String(u.extension) === ext
+          )
+          return {
+            extension: ext,
+            assignedUser: matchedUser?.name ?? "Unassigned",
+            department: matchedUser?.department ?? "—",
+            registrationStatus:
+              ep.state === "online" ? "registered" : "unregistered",
+            network: "LAN",
+            encryption: "TLS/SRTP",
+            lastIp: "—",
+            state: ep.state ?? "offline",
+          }
+        })
+        .filter((row) => row.extension.length > 0)
+    } else if (serverUsers.length > 0) {
+      merged = serverUsers
+        .filter((u: any) => u.extension != null && String(u.extension).trim() !== "")
+        .map((u: any) => ({
+          extension: String(u.extension),
+          assignedUser: u.name ?? "—",
+          department: u.department ?? "—",
+          registrationStatus: "unregistered",
           network: "LAN",
           encryption: "TLS/SRTP",
           lastIp: "—",
-          state: ep.state,
-        }
-      })
-      setEndpoints(merged)
+          state: "offline",
+        }))
     }
+
+    setEndpoints(merged)
+    setPortalUsers(
+      serverUsers.map((u: any) => ({
+        id: String(u.id ?? ""),
+        name: String(u.name ?? ""),
+        email: String(u.email ?? ""),
+        department: String(u.department ?? ""),
+        extension: String(u.extension ?? ""),
+        role: String(u.role ?? "user"),
+      }))
+    )
+    setFreedExts(listFreedExtensions())
 
     setLastRefresh(new Date().toLocaleTimeString())
     setLoading(false)
   }
 
+  const unassignedExtensions = useMemo(
+    () =>
+      endpoints
+        .filter((e) => e.assignedUser === "Unassigned")
+        .map((e) => e.extension),
+    [endpoints]
+  )
+
+  const availableToReassign = useMemo(() => {
+    const set = new Set<string>([...freedExts, ...unassignedExtensions])
+    return Array.from(set).sort((a, b) => Number(a) - Number(b))
+  }, [freedExts, unassignedExtensions])
+
+  const usersWithoutExtension = useMemo(
+    () => portalUsers.filter((u) => !String(u.extension ?? "").trim()),
+    [portalUsers]
+  )
+
+  const openReconfigure = (prefillExt?: string) => {
+    const ext = prefillExt ?? availableToReassign[0] ?? ""
+    const pwd = ext ? generateExtensionPassword(ext) : ""
+    setReconfig({
+      extension: ext,
+      assignMode: usersWithoutExtension.length > 0 ? "existing" : "new",
+      userId: usersWithoutExtension[0]?.id ?? "",
+      name: "",
+      email: "",
+      department: departments[0] ?? "",
+      role: "user",
+      password: pwd,
+    })
+    setShowReconfigure(true)
+  }
+
+  const ensureExtensionOnPbx = async (ext: string, password: string) => {
+    const onPbx = endpoints.some((e) => e.extension === ext)
+    if (onPbx) return true
+    const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.extensions), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildExtensionPostBody(ext, password)),
+    })
+    return res.ok
+  }
+
+  const handleReconfigure = async () => {
+    const ext = reconfig.extension.trim()
+    if (!ext) {
+      toast.error("Extension required", { description: "Enter or select an extension number." })
+      return
+    }
+  const password = reconfig.password.trim() || generateExtensionPassword(ext)
+
+    setReconfigLoading(true)
+    try {
+      const pbxOk = await ensureExtensionOnPbx(ext, password)
+      if (!pbxOk) {
+        toast.error("PBX provisioning failed", {
+          description: `Could not create extension ${ext} on Asterisk.`,
+        })
+        setReconfigLoading(false)
+        return
+      }
+
+      if (reconfig.assignMode === "existing") {
+        if (!reconfig.userId) {
+          toast.error("Select a user", { description: "Choose a portal user to assign this extension." })
+          setReconfigLoading(false)
+          return
+        }
+        const res = await fetch(
+          apiUrl(ASTERISK_API, BridgePaths.users, reconfig.userId),
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ extension: ext }),
+          }
+        )
+        if (!res.ok) {
+          toast.error("User assignment failed", {
+            description: `HTTP ${res.status} updating portal user.`,
+          })
+          setReconfigLoading(false)
+          return
+        }
+      } else {
+        if (!reconfig.name.trim() || !reconfig.email.trim() || !reconfig.department) {
+          toast.error("User details required", {
+            description: "Name, email, and department are required for a new user.",
+          })
+          setReconfigLoading(false)
+          return
+        }
+        const userRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: reconfig.name.trim(),
+            email: reconfig.email.trim(),
+            department: reconfig.department,
+            role: reconfig.role,
+            extension: ext,
+            status: "active",
+            password,
+            mustChangePassword: true,
+          }),
+        })
+        const parsed = await readJsonResponse(userRes)
+        if (!userRes.ok) {
+          toast.error("User creation failed", {
+            description:
+              typeof parsed.object?.error === "string"
+                ? String(parsed.object.error)
+                : `HTTP ${userRes.status}`,
+          })
+          setReconfigLoading(false)
+          return
+        }
+      }
+
+      clearFreedExtension(ext)
+      toast.success("Extension reconfigured", {
+        description:
+          reconfig.assignMode === "existing"
+            ? `Extension ${ext} assigned to the selected user.`
+            : `Extension ${ext} created and assigned to the new user.`,
+      })
+      setShowReconfigure(false)
+      void fetchEndpoints()
+    } catch {
+      toast.error("Reconfigure failed", { description: "Cannot reach Asterisk API." })
+    }
+    setReconfigLoading(false)
+  }
+
   useEffect(() => {
-    fetchEndpoints()
-    const interval = setInterval(fetchEndpoints, 5000)
-    return () => clearInterval(interval)
+    void fetchEndpoints()
+    const preset = consumePortalPageSearch()
+    if (preset) setSearch(preset)
   }, [])
 
-  // ─── Delete extension ─────────────────────────────────────────────────────
+  // ─── Delete extension + linked portal user ───────────────────────────────
   const handleDelete = async (ext: string) => {
-    if (!confirm(`Delete extension ${ext} from Asterisk?`)) return
+    if (
+      !confirm(
+        `Delete extension ${ext} from Asterisk and remove any linked portal user?\n\nThis cannot be undone.`
+      )
+    ) {
+      return
+    }
     try {
-      const res = await fetch(`${ASTERISK_API}/extensions/${ext}`, {
-        method: "DELETE",
-      })
-      const data = await res.json()
-      if (data.success) {
-        setEndpoints(prev => prev.filter(e => e.extension !== ext))
-        alert(`Extension ${ext} deleted from Asterisk`)
+      let linkedUser: { id: string } | null = null
+      try {
+        const usersRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.users))
+        const usersData = await usersRes.json()
+        if (Array.isArray(usersData)) {
+          linkedUser =
+            usersData.find((u: { extension?: string }) => String(u.extension) === ext) ??
+            null
+        }
+      } catch {
+        /* continue with extension delete */
+      }
+
+      const extRes = await fetch(
+        apiUrl(ASTERISK_API, BridgePaths.extensions, encodeURIComponent(ext)),
+        { method: "DELETE" }
+      )
+
+      if (linkedUser?.id) {
+        await fetch(apiUrl(ASTERISK_API, BridgePaths.users, linkedUser.id), {
+          method: "DELETE",
+        })
+      }
+
+      if (extRes.ok) {
+        recordFreedExtension(ext)
+        setEndpoints((prev) => prev.filter((e) => e.extension !== ext))
+        setFreedExts(listFreedExtensions())
+        toast.success("Extension deleted", {
+          description: linkedUser
+            ? `Extension ${ext} and linked user removed.`
+            : `Extension ${ext} removed from Asterisk.`,
+        })
+        void fetchEndpoints()
+      } else {
+        toast.error("Delete failed", {
+          description: `Could not delete extension ${ext} (HTTP ${extRes.status}).`,
+        })
       }
     } catch {
-      alert("Failed to delete extension")
+      toast.error("Delete failed", { description: "Cannot reach Asterisk API." })
     }
   }
 
@@ -104,9 +367,15 @@ const fetchEndpoints = async () => {
           <h2 className="text-2xl font-bold text-foreground">Extension Management</h2>
           <p className="text-sm text-muted-foreground">Live SIP extensions from Asterisk PBX</p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-muted-foreground">Last updated: {lastRefresh}</span>
-          <Button variant="outline" size="sm" onClick={fetchEndpoints}>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground hidden sm:inline">
+            Last updated: {lastRefresh}
+          </span>
+          <Button variant="outline" size="sm" onClick={() => openReconfigure()}>
+            <RotateCcw className="mr-2 h-4 w-4" />
+            Reconfigure / Assign
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void fetchEndpoints()}>
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
@@ -137,6 +406,33 @@ const fetchEndpoints = async () => {
           </CardContent>
         </Card>
       </div>
+
+      {availableToReassign.length > 0 && (
+        <Card className="border border-amber-500/30 bg-amber-500/5">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-semibold">
+              Available for reassignment ({availableToReassign.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            {availableToReassign.map((ext) => (
+              <Button
+                key={ext}
+                type="button"
+                variant="outline"
+                size="sm"
+                className="font-mono"
+                onClick={() => openReconfigure(ext)}
+              >
+                {ext}
+                {freedExts.includes(ext) ? (
+                  <span className="ml-1.5 text-[10px] text-amber-700">recycled</span>
+                ) : null}
+              </Button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -206,10 +502,12 @@ const fetchEndpoints = async () => {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => handleDelete(ext.extension)}
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                          onClick={() => void handleDelete(ext.extension)}
+                          aria-label={`Delete extension ${ext.extension}`}
+                          title="Delete extension"
                         >
-                          <Settings className="h-4 w-4" />
+                          <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
                     </td>
@@ -221,6 +519,168 @@ const fetchEndpoints = async () => {
           )}
         </CardContent>
       </Card>
+
+      {/* Reconfigure / assign extension */}
+      <Dialog open={showReconfigure} onOpenChange={setShowReconfigure}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <UserPlus className="h-4 w-4" />
+              Reconfigure extension & assign user
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-4 py-2">
+            <div className="flex flex-col gap-2">
+              <Label>Extension number</Label>
+              {availableToReassign.length > 0 ? (
+                <Select
+                  value={reconfig.extension}
+                  onValueChange={(v) =>
+                    setReconfig((r) => ({
+                      ...r,
+                      extension: v,
+                      password: generateExtensionPassword(v),
+                    }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select extension" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableToReassign.map((ext) => (
+                      <SelectItem key={ext} value={ext}>
+                        {ext}
+                        {freedExts.includes(ext) ? " (recycled)" : " (unassigned)"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value={reconfig.extension}
+                  onChange={(e) =>
+                    setReconfig((r) => ({
+                      ...r,
+                      extension: e.target.value,
+                      password: e.target.value
+                        ? generateExtensionPassword(e.target.value)
+                        : r.password,
+                    }))
+                  }
+                  placeholder="e.g. 1042"
+                  className="font-mono"
+                />
+              )}
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label>SIP password (for new/recreated extension)</Label>
+              <Input
+                value={reconfig.password}
+                onChange={(e) =>
+                  setReconfig((r) => ({ ...r, password: e.target.value }))
+                }
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label>Assign to</Label>
+              <Select
+                value={reconfig.assignMode}
+                onValueChange={(v) =>
+                  setReconfig((r) => ({
+                    ...r,
+                    assignMode: v as "existing" | "new",
+                  }))
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="existing" disabled={usersWithoutExtension.length === 0}>
+                    Existing user (no extension)
+                  </SelectItem>
+                  <SelectItem value="new">New portal user</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {reconfig.assignMode === "existing" ? (
+              <div className="flex flex-col gap-2">
+                <Label>Portal user</Label>
+                <Select
+                  value={reconfig.userId}
+                  onValueChange={(v) => setReconfig((r) => ({ ...r, userId: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select user" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {usersWithoutExtension.map((u) => (
+                      <SelectItem key={u.id} value={u.id}>
+                        {u.name} — {u.email}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-col gap-2">
+                  <Label>Full name</Label>
+                  <Input
+                    value={reconfig.name}
+                    onChange={(e) =>
+                      setReconfig((r) => ({ ...r, name: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label>Email</Label>
+                  <Input
+                    type="email"
+                    value={reconfig.email}
+                    onChange={(e) =>
+                      setReconfig((r) => ({ ...r, email: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label>Department</Label>
+                  <Select
+                    value={reconfig.department}
+                    onValueChange={(v) =>
+                      setReconfig((r) => ({ ...r, department: v }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {departments.map((d) => (
+                        <SelectItem key={d} value={d}>
+                          {d}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowReconfigure(false)}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-primary text-primary-foreground"
+              disabled={reconfigLoading}
+              onClick={() => void handleReconfigure()}
+            >
+              {reconfigLoading ? "Saving…" : "Save & assign"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Extension Detail Modal */}
       <Dialog open={!!selectedExt} onOpenChange={() => setSelectedExt(null)}>

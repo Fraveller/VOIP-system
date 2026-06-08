@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useAuth } from "@/lib/auth-context"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
 
 type PasswordRule = {
   label: string
@@ -58,14 +58,22 @@ export function ChangePasswordPage({ onComplete }: { onComplete: () => void }) {
 
     setLoading(true)
     try {
-      const res = await fetch(`${ASTERISK_API}/users/${user?.id}/change-password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          currentPassword,
-          newPassword,
-        }),
-      })
+      const res = await fetch(
+        apiUrl(
+          ASTERISK_API,
+          BridgePaths.users,
+          String(user?.id ?? ""),
+          "change-password"
+        ),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            currentPassword,
+            newPassword,
+          }),
+        }
+      )
 
       const data = await res.json()
 

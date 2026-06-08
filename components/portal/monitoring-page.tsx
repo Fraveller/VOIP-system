@@ -1,18 +1,27 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Activity, Wifi, ShieldCheck, Clock, Server, HardDrive, Cpu, MemoryStick } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { KpiCard } from "./kpi-card"
 import { StatusBadge } from "./status-badge"
 import { Progress } from "@/components/ui/progress"
-import { fetchLiveEndpoints, fetchActiveCalls, fetchServerInfo, ASTERISK_API } from "@/lib/mock-data"
+import {
+  fetchLiveEndpoints,
+  fetchActiveCalls,
+  fetchServerInfo,
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+} from "@/lib/mock-data"
+import { useAsteriskHealth } from "@/hooks/use-asterisk-health"
 
 export function MonitoringPage() {
+  const { status: health } = useAsteriskHealth(false)
+
   const [activeCalls, setActiveCalls]     = useState<number>(0)
   const [totalExt, setTotalExt]           = useState<number>(0)
   const [registeredExt, setRegisteredExt] = useState<number>(0)
-  const [pbxOnline, setPbxOnline]         = useState<boolean>(false)
   const [pbxVersion, setPbxVersion]       = useState<string>("—")
   const [lastRefresh, setLastRefresh]     = useState<string>("—")
   const [cpuUsage, setCpuUsage]           = useState<number>(0)
@@ -20,21 +29,31 @@ export function MonitoringPage() {
   const [diskUsage, setDiskUsage]         = useState<number>(0)
   const [uptime, setUptime]               = useState<string>("—")
 
+  /** Same logic as the top navbar (`AsteriskConnectionIndicator`): bridge reachability, not endpoint list shape. */
+  const bridgeOk = useMemo(() => {
+    const k = health.kind
+    return k === "online" || k === "degraded"
+  }, [health])
+
+  const bridgeFullyOnline = health.kind === "online"
+
   useEffect(() => {
     const fetchAll = async () => {
-      // Fetch endpoints
+      // Fetch endpoints (counts only — do not infer PBX up/down from this; `/endpoints` may be empty or a different JSON shape)
       const endpoints = await fetchLiveEndpoints()
-      if (endpoints) {
+      if (Array.isArray(endpoints)) {
         setTotalExt(endpoints.length)
-        setRegisteredExt(endpoints.filter((e: any) => e.state === "online").length)
-        setPbxOnline(true)
+        setRegisteredExt(
+          endpoints.filter((e: any) => e.state === "online").length
+        )
       } else {
-        setPbxOnline(false)
+        setTotalExt(0)
+        setRegisteredExt(0)
       }
 
-      // Fetch active calls
       const channels = await fetchActiveCalls()
-      if (channels) setActiveCalls(channels.length)
+      if (Array.isArray(channels)) setActiveCalls(channels.length)
+      else setActiveCalls(0)
 
       // Fetch server info
       const info = await fetchServerInfo()
@@ -42,7 +61,7 @@ export function MonitoringPage() {
 
       // Fetch system stats
       try {
-        const sysRes = await fetch(`${ASTERISK_API}/system`)
+        const sysRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.system))
         const sysData = await sysRes.json()
         if (sysData) {
           setCpuUsage(sysData.cpu)
@@ -57,9 +76,7 @@ export function MonitoringPage() {
       setLastRefresh(new Date().toLocaleTimeString())
     }
 
-    fetchAll()
-    const interval = setInterval(fetchAll, 5000)
-    return () => clearInterval(interval)
+    void fetchAll()
   }, [])
 
   return (
@@ -69,15 +86,40 @@ export function MonitoringPage() {
           <h2 className="text-2xl font-bold text-foreground">System Monitoring</h2>
           <p className="text-sm text-muted-foreground">Real-time PBX and network health monitoring</p>
         </div>
-        <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium border ${pbxOnline ? "bg-green-500/10 border-green-500/30 text-green-500" : "bg-red-500/10 border-red-500/30 text-red-500"}`}>
-          <span className={`h-2 w-2 rounded-full ${pbxOnline ? "bg-green-500" : "bg-red-500"}`} />
-          {pbxOnline ? `Asterisk ${pbxVersion} — Online` : "PBX Offline"} · {lastRefresh}
+        <div
+          className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium border ${
+            health.kind === "online"
+              ? "bg-green-500/10 border-green-500/30 text-green-500"
+              : health.kind === "degraded"
+                ? "bg-amber-500/10 border-amber-500/30 text-amber-600"
+                : health.kind === "checking"
+                  ? "bg-amber-500/10 border-amber-500/30 text-amber-600"
+                  : "bg-red-500/10 border-red-500/30 text-red-500"
+          }`}
+        >
+          <span
+            className={`h-2 w-2 rounded-full ${
+              health.kind === "online"
+                ? "bg-green-500"
+                : health.kind === "degraded" || health.kind === "checking"
+                  ? "bg-amber-500"
+                  : "bg-red-500"
+            }`}
+          />
+          {health.kind === "checking" && <>Checking bridge… · {lastRefresh}</>}
+          {health.kind === "online" && (
+            <>Asterisk {pbxVersion} — Online · {lastRefresh}</>
+          )}
+          {health.kind === "degraded" && (
+            <>PBX reachable (HTTP {health.httpStatus}) · {lastRefresh}</>
+          )}
+          {health.kind === "offline" && <>PBX Offline · {lastRefresh}</>}
         </div>
       </div>
 
       {/* KPIs */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard title="PBX Uptime"    value={uptime}                            icon={Server}   trend="Live from server" trendUp={pbxOnline} />
+        <KpiCard title="PBX Uptime"    value={uptime}                            icon={Server}   trend="Live from server" trendUp={bridgeOk} />
         <KpiCard title="Active Calls"  value={activeCalls}                       icon={Activity} trend="Live — refreshes every 5s" trendUp />
         <KpiCard title="Registered"    value={registeredExt}                     icon={Wifi}     trend={`of ${totalExt} extensions`} trendUp />
         <KpiCard title="Unregistered"  value={totalExt - registeredExt}          icon={Clock}    trend="No softphone connected" trendUp={false} />
@@ -143,15 +185,15 @@ export function MonitoringPage() {
           <CardContent className="flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <span className="text-sm">PBX Main Interface</span>
-              <StatusBadge label={pbxOnline ? "Online" : "Offline"} variant={pbxOnline ? "success" : "danger"} />
+              <StatusBadge label={bridgeFullyOnline ? "Online" : bridgeOk ? "Degraded" : "Offline"} variant={bridgeFullyOnline ? "success" : bridgeOk ? "warning" : "danger"} />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm">SIP Port (5060/UDP)</span>
-              <StatusBadge label={pbxOnline ? "Listening" : "Unreachable"} variant={pbxOnline ? "success" : "danger"} />
+              <StatusBadge label={bridgeOk ? "Listening" : "Unreachable"} variant={bridgeOk ? "success" : "danger"} />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm">ARI Interface (8088)</span>
-              <StatusBadge label={pbxOnline ? "Connected" : "Offline"} variant={pbxOnline ? "success" : "danger"} />
+              <StatusBadge label={bridgeOk ? "Connected" : "Offline"} variant={bridgeOk ? "success" : "danger"} />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm">RTP Media Ports</span>
@@ -159,7 +201,7 @@ export function MonitoringPage() {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm">Backend API (3001)</span>
-              <StatusBadge label={pbxOnline ? "Running" : "Down"} variant={pbxOnline ? "success" : "danger"} />
+              <StatusBadge label={bridgeOk ? "Running" : "Down"} variant={bridgeOk ? "success" : "danger"} />
             </div>
           </CardContent>
         </Card>
@@ -189,10 +231,10 @@ export function MonitoringPage() {
               <span className="text-sm">Intrusion Detection</span>
               <StatusBadge label="Active" variant="success" />
             </div>
-            <div className="flex items-center justify-between">
+            {/*<div className="flex items-center justify-between">
               <span className="text-sm">Certificate Expiry</span>
-              <StatusBadge label="15 days" variant="warning" />
-            </div>
+              <StatusBadge label="---" variant="warning" />
+            </div>*/}
           </CardContent>
         </Card>
 

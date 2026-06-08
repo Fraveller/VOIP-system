@@ -1,7 +1,8 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Phone, PhoneMissed, Voicemail, UserCircle, BookOpen, PhoneCall, Settings, Wifi, Shield, Globe, RefreshCw } from "lucide-react"
+import { useState, useEffect, useCallback } from "react"
+import { Phone, PhoneMissed, UserCircle, BookOpen, PhoneCall, Settings, Wifi, Shield, Globe, RefreshCw } from "lucide-react"
+import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -9,34 +10,50 @@ import { Label } from "@/components/ui/label"
 import { KpiCard } from "./kpi-card"
 import { StatusBadge } from "./status-badge"
 import { useAuth } from "@/lib/auth-context"
-import { ASTERISK_API, fetchLiveEndpoints } from "@/lib/mock-data"
+import { useRouter } from "./portal-router"
+import {
+  ASTERISK_API,
+  apiUrl,
+  BridgePaths,
+  fetchLiveEndpoints,
+} from "@/lib/mock-data"
+import { usePbxHost } from "@/hooks/use-pbx-host"
 
 export function UserDashboard() {
   const { user } = useAuth()
+  const { navigate } = useRouter()
   const [dnd, setDnd]               = useState(false)
   const [forwarding, setForwarding] = useState(false)
   const [isOnline, setIsOnline]     = useState(false)
   const [activeCalls, setActiveCalls] = useState(0)
   const [recentCalls, setRecentCalls] = useState<any[]>([])
-  const [voicemails, setVoicemails]   = useState<any[]>([])
+  const { sipHost: pbxServerHost, sipPort: pbxSipPort, reload: reloadPbxHost } =
+    usePbxHost()
   const [lastRefresh, setLastRefresh] = useState("—")
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
+      await reloadPbxHost()
       // Check if my extension is registered
       const endpoints = await fetchLiveEndpoints()
-      if (endpoints && user?.extension) {
-        const myEp = endpoints.find((e: any) => e.resource === user.extension)
+      const list = Array.isArray(endpoints) ? endpoints : []
+      if (user?.extension) {
+        const myEp = list.find(
+          (e: any) =>
+            String(e.resource ?? e.extension) === String(user.extension)
+        )
         setIsOnline(myEp?.state === "online")
+      } else {
+        setIsOnline(false)
       }
 
       // Active calls count
-      const chRes = await fetch(`${ASTERISK_API}/channels`)
+      const chRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.channels))
       const channels = await chRes.json()
       if (Array.isArray(channels)) setActiveCalls(channels.length)
 
       // Real CDR records
-      const cdrRes = await fetch(`${ASTERISK_API}/realcdr`)
+      const cdrRes = await fetch(apiUrl(ASTERISK_API, BridgePaths.realcdr))
       const cdrData = await cdrRes.json()
       if (Array.isArray(cdrData)) {
         // Filter calls involving my extension
@@ -48,13 +65,11 @@ export function UserDashboard() {
 
     } catch { }
     setLastRefresh(new Date().toLocaleTimeString())
-  }
+  }, [user?.extension, reloadPbxHost])
 
   useEffect(() => {
-    fetchData()
-    const interval = setInterval(fetchData, 5000)
-    return () => clearInterval(interval)
-  }, [])
+    void fetchData()
+  }, [fetchData])
 
   const missedCalls = recentCalls.filter(c => c.type === "Missed").length
 
@@ -106,19 +121,43 @@ export function UserDashboard() {
 
       {/* Quick Actions */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Button className="h-auto flex-col gap-2 bg-primary py-4 text-primary-foreground hover:bg-primary/90">
+        <Button
+          type="button"
+          className="h-auto flex-col gap-2 bg-primary py-4 text-primary-foreground hover:bg-primary/90"
+          onClick={() => {
+            navigate("/dashboard/settings")
+            toast.info(
+              `Open your SIP softphone and register with server ${pbxServerHost ?? "—"}:${pbxSipPort ?? "5060"}, extension ${user?.extension ?? "—"}.`,
+            )
+          }}
+        >
           <Phone className="h-5 w-5" />
           <span className="text-sm font-medium">Launch Softphone</span>
         </Button>
-        <Button variant="outline" className="h-auto flex-col gap-2 py-4 border-border">
+        <Button
+          type="button"
+          variant="outline"
+          className="h-auto flex-col gap-2 py-4 border-border"
+          onClick={() => navigate("/dashboard/directory")}
+        >
           <BookOpen className="h-5 w-5" />
           <span className="text-sm font-medium">Open Directory</span>
         </Button>
-        <Button variant="outline" className="h-auto flex-col gap-2 py-4 border-border">
+        <Button
+          type="button"
+          variant="outline"
+          className="h-auto flex-col gap-2 py-4 border-border"
+          onClick={() => navigate("/dashboard/my-calls")}
+        >
           <PhoneCall className="h-5 w-5" />
           <span className="text-sm font-medium">Call History</span>
         </Button>
-        <Button variant="outline" className="h-auto flex-col gap-2 py-4 border-border">
+        <Button
+          type="button"
+          variant="outline"
+          className="h-auto flex-col gap-2 py-4 border-border"
+          onClick={() => navigate("/dashboard/settings")}
+        >
           <Settings className="h-5 w-5" />
           <span className="text-sm font-medium">Call Settings</span>
         </Button>
@@ -215,7 +254,9 @@ export function UserDashboard() {
                   <Globe className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm">PBX Server</span>
                 </div>
-                <span className="text-sm font-mono text-foreground">192.168.1.13</span>
+                <span className="text-sm font-mono text-foreground" title={`SIP port ${pbxSipPort ?? "5060"}`}>
+                  {pbxServerHost ?? "—"}
+                </span>
               </div>
             </CardContent>
           </Card>

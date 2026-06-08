@@ -1,6 +1,7 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { toast } from "sonner"
 import { Save, Bell, Shield, Phone, Eye, EyeOff, CheckCircle, XCircle } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -9,7 +10,12 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useAuth } from "@/lib/auth-context"
-import { ASTERISK_API } from "@/lib/mock-data"
+import { ASTERISK_API, apiUrl, BridgePaths } from "@/lib/mock-data"
+import { usePbxHost } from "@/hooks/use-pbx-host"
+import {
+  loadNotificationPrefs,
+  saveNotificationPrefs,
+} from "@/lib/user-preferences"
 
 type PasswordRule = {
   label: string
@@ -25,11 +31,35 @@ const rules: PasswordRule[] = [
 
 export function SettingsPage() {
   const { user } = useAuth()
+  const { sipHost, sipPort } = usePbxHost()
 
   // ─── Notification state ───────────────────────────────────────────────────
   const [emailNotifications, setEmailNotifications] = useState(true)
   const [callAlerts, setCallAlerts]                 = useState(true)
   const [securityAlerts, setSecurityAlerts]         = useState(true)
+  const [prefsSaving, setPrefsSaving]               = useState(false)
+
+  useEffect(() => {
+    if (!user?.id) return
+    const prefs = loadNotificationPrefs(user.id)
+    setEmailNotifications(prefs.emailNotifications)
+    setCallAlerts(prefs.callAlerts)
+    setSecurityAlerts(prefs.securityAlerts)
+  }, [user?.id])
+
+  const handleSavePreferences = () => {
+    if (!user?.id) return
+    setPrefsSaving(true)
+    saveNotificationPrefs(user.id, {
+      emailNotifications,
+      callAlerts,
+      securityAlerts,
+    })
+    setPrefsSaving(false)
+    toast.success("Preferences saved", {
+      description: "Your notification settings have been updated.",
+    })
+  }
 
   // ─── Password change state ────────────────────────────────────────────────
   const [currentPassword, setCurrentPassword] = useState("")
@@ -57,11 +87,19 @@ export function SettingsPage() {
 
     setPwdLoading(true)
     try {
-      const res = await fetch(`${ASTERISK_API}/users/${user?.id}/change-password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentPassword, newPassword }),
-      })
+      const res = await fetch(
+        apiUrl(
+          ASTERISK_API,
+          BridgePaths.users,
+          String(user?.id ?? ""),
+          "change-password"
+        ),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ currentPassword, newPassword }),
+        },
+      )
 
       const data = await res.json()
       if (!res.ok) {
@@ -148,9 +186,14 @@ export function SettingsPage() {
               </div>
               <Switch checked={securityAlerts} onCheckedChange={setSecurityAlerts} />
             </div>
-            <Button className="w-fit bg-primary text-primary-foreground hover:bg-primary/90">
+            <Button
+              type="button"
+              className="w-fit bg-primary text-primary-foreground hover:bg-primary/90"
+              disabled={prefsSaving || !user?.id}
+              onClick={handleSavePreferences}
+            >
               <Save className="mr-2 h-4 w-4" />
-              Save Preferences
+              {prefsSaving ? "Saving…" : "Save Preferences"}
             </Button>
           </CardContent>
         </Card>
@@ -178,10 +221,10 @@ export function SettingsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex flex-col gap-2">
+            {/*<div className="flex flex-col gap-2">
               <Label className="text-sm">Call Forwarding Number</Label>
               <Input placeholder="Enter forwarding number" />
-            </div>
+            </div>*/}
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-foreground">Voicemail</p>
@@ -196,7 +239,7 @@ export function SettingsPage() {
               <div className="flex flex-col gap-1 text-xs text-muted-foreground">
                 <div className="flex justify-between">
                   <span>Server:</span>
-                  <span className="font-mono">192.168.1.13:5060</span>
+                  <span className="font-mono">{sipHost ?? "—"}:{sipPort ?? "5060"}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Username:</span>

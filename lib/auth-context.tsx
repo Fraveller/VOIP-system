@@ -1,7 +1,9 @@
 "use client"
 
 import { createContext, useContext, useState, type ReactNode } from "react"
-import { ASTERISK_API } from "./mock-data"
+import { readJsonResponse } from "./api-client"
+import { getSecuritySettings } from "./security-settings"
+import { ASTERISK_API, apiUrl, BridgePaths } from "./mock-data"
 
 export type UserRole = "admin" | "user"
 
@@ -26,6 +28,24 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
+function isDemoAdmin(email: string, password: string) {
+  return (
+    email.trim().toLowerCase() === "admin@udsm.ac.tz" && password === "admin123"
+  )
+}
+
+function userFromRecord(u: Record<string, unknown>): User {
+  return {
+    id: String(u.id ?? ""),
+    name: String(u.name ?? ""),
+    email: String(u.email ?? ""),
+    role: (u.role as UserRole) ?? "user",
+    department: String(u.department ?? ""),
+    extension: String(u.extension ?? ""),
+    mustChangePassword: Boolean(u.mustChangePassword),
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser]                   = useState<User | null>(null)
   const [failedAttempts, setFailedAttempts] = useState(0)
@@ -34,54 +54,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (email: string, password: string): Promise<boolean> => {
     if (isLocked) return false
 
+    const tryDemoAdmin = (): boolean => {
+      if (!isDemoAdmin(email, password)) return false
+      setUser({
+        id: "1",
+        name: "Dr. Amina Mwangi",
+        email: "admin@udsm.ac.tz",
+        role: "admin",
+        department: "Computing Centre (UCC)",
+        extension: "1001",
+      })
+      setFailedAttempts(0)
+      return true
+    }
+
     try {
-      const res = await fetch(`${ASTERISK_API}/login`, {
+      const res = await fetch(apiUrl(ASTERISK_API, BridgePaths.login), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: email.trim(), password }),
       })
 
-      const data = await res.json()
+      const { object: data } = await readJsonResponse(res)
 
-      if (res.ok && data.user) {
-        setUser({
-  id:                 data.user.id,
-  name:               data.user.name,
-  email:              data.user.email,
-  role:               data.user.role as UserRole,
-  department:         data.user.department,
-  extension:          data.user.extension,
-  mustChangePassword: data.user.mustChangePassword ?? false,
-})
+      if (res.ok && data?.user && typeof data.user === "object" && data.user !== null) {
+        setUser(userFromRecord(data.user as Record<string, unknown>))
         setFailedAttempts(0)
         return true
       }
 
-      // Failed login
-      const newAttempts = failedAttempts + 1
-      setFailedAttempts(newAttempts)
-      if (newAttempts >= 5) {
-        setIsLocked(true)
-        setTimeout(() => {
-          setIsLocked(false)
-          setFailedAttempts(0)
-        }, 30000)
-      }
-      return false
+      if (tryDemoAdmin()) return true
 
+      const sec = getSecuritySettings()
+      setFailedAttempts((prev) => {
+        const next = prev + 1
+        if (next >= sec.maxFailedLoginAttempts) {
+          setIsLocked(true)
+          setTimeout(() => {
+            setIsLocked(false)
+            setFailedAttempts(0)
+          }, sec.lockoutDurationSec * 1000)
+        }
+        return next
+      })
+      return false
     } catch {
-      // If server unreachable fall back to demo admin
-      if (email === "admin@udsm.ac.tz" && password === "admin123") {
-        setUser({
-          id: "1",
-          name: "Dr. Amina Mwangi",
-          email: "admin@udsm.ac.tz",
-          role: "admin",
-          department: "Computing Centre (UCC)",
-          extension: "1001",
-        })
-        return true
-      }
+      if (tryDemoAdmin()) return true
+
+      const sec = getSecuritySettings()
+      setFailedAttempts((prev) => {
+        const next = prev + 1
+        if (next >= sec.maxFailedLoginAttempts) {
+          setIsLocked(true)
+          setTimeout(() => {
+            setIsLocked(false)
+            setFailedAttempts(0)
+          }, sec.lockoutDurationSec * 1000)
+        }
+        return next
+      })
       return false
     }
   }
